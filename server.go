@@ -21,7 +21,12 @@ import (
 type DaemonConfig struct {
 	SocketPath string     // Required. Unix domain socket path.
 	Tools      []mcp.Tool // MCP tool definitions to serve via ListTools.
-	Handler    ToolHandler // Handles CallTool RPCs.
+	Handler    ToolHandler // Handles CallTool RPCs (shared across all connections).
+
+	// HandlerFactory creates a per-connection handler given the project
+	// root from the client handshake. When set, it takes priority over
+	// Handler.
+	HandlerFactory func(root string) ToolHandler
 
 	// ExtraMethods registers additional RPC methods beyond ListTools
 	// and CallTool. Each function receives raw JSON params and returns
@@ -31,10 +36,11 @@ type DaemonConfig struct {
 
 // Server listens on a Unix domain socket and dispatches RPC calls.
 type Server struct {
-	tools        []mcp.Tool
-	handler      ToolHandler
-	extraMethods map[string]MethodFunc
-	listener     net.Listener
+	tools          []mcp.Tool
+	handler        ToolHandler
+	handlerFactory func(string) ToolHandler
+	extraMethods   map[string]MethodFunc
+	listener       net.Listener
 
 	mu    sync.Mutex
 	conns []net.Conn
@@ -60,10 +66,11 @@ func NewServer(cfg DaemonConfig, opts ...ServerOption) (*Server, error) {
 	}
 
 	srv := &Server{
-		tools:        cfg.Tools,
-		handler:      cfg.Handler,
-		extraMethods: cfg.ExtraMethods,
-		listener:     listener,
+		tools:          cfg.Tools,
+		handler:        cfg.Handler,
+		handlerFactory: cfg.HandlerFactory,
+		extraMethods:   cfg.ExtraMethods,
+		listener:       listener,
 	}
 	for _, opt := range opts {
 		opt(srv)
@@ -125,6 +132,12 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 	enc.Encode(Response{Result: []byte(`"ok"`)})
 
+	// Determine handler for this connection.
+	handler := s.handler
+	if s.handlerFactory != nil {
+		handler = s.handlerFactory(hs.Root)
+	}
+
 	for scanner.Scan() {
 		var req Request
 		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
@@ -133,7 +146,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		}
 
 		start := time.Now()
-		result, err := s.dispatch(req)
+		result, err := s.dispatch(req, handler)
 		dur := time.Since(start)
 
 		if err != nil {
@@ -160,7 +173,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
-func (s *Server) dispatch(req Request) (any, error) {
+func (s *Server) dispatch(req Request, handler ToolHandler) (any, error) {
 	switch req.Method {
 	case "ListTools":
 		return s.tools, nil
@@ -170,7 +183,7 @@ func (s *Server) dispatch(req Request) (any, error) {
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		text, isErr, err := s.handler.Call(p.Name, p.Args)
+		text, isErr, err := handler.Call(p.Name, p.Args)
 		if err != nil {
 			return nil, err
 		}

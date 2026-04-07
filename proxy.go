@@ -49,6 +49,7 @@ type ProxyConfig struct {
 	SocketPath string    // Required. Unix domain socket path to daemon.
 	ServerName string    // MCP server name (e.g., "mnemo").
 	Version    string    // MCP server version.
+	Root       string    // Project root to send in handshake.
 	Stdin      io.Reader // Optional. Defaults to os.Stdin.
 	Stdout     io.Writer // Optional. Defaults to os.Stdout.
 }
@@ -57,7 +58,7 @@ type ProxyConfig struct {
 // tool definitions, and serves MCP over stdin/stdout. Blocks until
 // stdin closes or an error occurs.
 func RunProxy(ctx context.Context, cfg ProxyConfig) error {
-	client, err := Dial(cfg.SocketPath)
+	client, err := Dial(cfg.SocketPath, cfg.Root)
 	if err != nil {
 		return err
 	}

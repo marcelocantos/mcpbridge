@@ -18,14 +18,19 @@ import (
 type Client struct {
 	mu       sync.Mutex
 	sockPath string
+	root     string
 	conn     net.Conn
 	enc      *json.Encoder
 	scanner  *bufio.Scanner
 }
 
-// Dial connects to a daemon at the given socket path.
-func Dial(socketPath string) (*Client, error) {
+// Dial connects to a daemon at the given socket path. An optional root
+// argument specifies the project root directory to send in the handshake.
+func Dial(socketPath string, root ...string) (*Client, error) {
 	c := &Client{sockPath: socketPath}
+	if len(root) > 0 {
+		c.root = root[0]
+	}
 	if err := c.connect(); err != nil {
 		return nil, err
 	}
@@ -41,8 +46,8 @@ func (c *Client) connect() error {
 	scanner.Buffer(make([]byte, 4<<20), 4<<20) // 4MB line buffer
 	enc := json.NewEncoder(conn)
 
-	// Send handshake with protocol version.
-	if err := enc.Encode(Handshake{ProtocolVersion: ProtocolVersion}); err != nil {
+	// Send handshake with protocol version and optional root.
+	if err := enc.Encode(Handshake{ProtocolVersion: ProtocolVersion, Root: c.root}); err != nil {
 		conn.Close()
 		return fmt.Errorf("handshake send: %w", err)
 	}

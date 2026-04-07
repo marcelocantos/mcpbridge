@@ -54,7 +54,8 @@ type CallResult struct {
 
 // Handshake is the first message sent by the client after connecting.
 type Handshake struct {
-	ProtocolVersion int `json:"protocol_version"`
+	ProtocolVersion int    `json:"protocol_version"`
+	Root            string `json:"root,omitempty"` // project root directory
 }
 
 // Request is a JSON-RPC-like request sent over the UDS.

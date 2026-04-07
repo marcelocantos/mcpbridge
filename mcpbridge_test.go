@@ -6,6 +6,7 @@ package mcpbridge
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -214,6 +215,139 @@ func TestExtraMethods(t *testing.T) {
 	}
 	if result["pong"] != "ok" {
 		t.Fatalf("expected pong=ok, got %v", result)
+	}
+}
+
+// rootHandler includes the root in its greeting to verify the factory received it.
+type rootHandler struct {
+	root string
+}
+
+func (h rootHandler) Call(name string, args map[string]any) (string, bool, error) {
+	switch name {
+	case "greet":
+		who, _ := args["name"].(string)
+		if who == "" {
+			who = "world"
+		}
+		return fmt.Sprintf("hello, %s from %s!", who, h.root), false, nil
+	default:
+		return "", false, fmt.Errorf("unknown tool: %s", name)
+	}
+}
+
+func TestHandlerFactory(t *testing.T) {
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("mcptest-hf-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { os.Remove(sockPath) })
+	srv, err := NewServer(DaemonConfig{
+		SocketPath: sockPath,
+		Tools:      testTools(),
+		HandlerFactory: func(root string) ToolHandler {
+			return rootHandler{root: root}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() { srv.Close() })
+
+	// Connect two clients with different roots.
+	c1, err := Dial(sockPath, "/project/alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	p1 := NewToolProxy(c1)
+
+	c2, err := Dial(sockPath, "/project/beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	p2 := NewToolProxy(c2)
+
+	// Each connection should have its own handler with its own root.
+	r1, err := p1.CallTool("greet", map[string]any{"name": "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.Text != "hello, alice from /project/alpha!" {
+		t.Fatalf("expected root alpha, got %q", r1.Text)
+	}
+
+	r2, err := p2.CallTool("greet", map[string]any{"name": "bob"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r2.Text != "hello, bob from /project/beta!" {
+		t.Fatalf("expected root beta, got %q", r2.Text)
+	}
+}
+
+func TestHandlerFactoryOverridesHandler(t *testing.T) {
+	// When both Handler and HandlerFactory are set, HandlerFactory wins.
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("mcptest-override-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { os.Remove(sockPath) })
+	srv, err := NewServer(DaemonConfig{
+		SocketPath: sockPath,
+		Tools:      testTools(),
+		Handler:    testHandler{}, // would return "hello, alice!"
+		HandlerFactory: func(root string) ToolHandler {
+			return rootHandler{root: root}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() { srv.Close() })
+
+	c, err := Dial(sockPath, "/my/project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	r, err := NewToolProxy(c).CallTool("greet", map[string]any{"name": "alice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Text != "hello, alice from /my/project!" {
+		t.Fatalf("expected factory handler, got %q", r.Text)
+	}
+}
+
+func TestDialWithoutRoot(t *testing.T) {
+	// Dial without root still works (backward compatibility).
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("mcptest-noroot-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { os.Remove(sockPath) })
+	srv, err := NewServer(DaemonConfig{
+		SocketPath: sockPath,
+		Tools:      testTools(),
+		HandlerFactory: func(root string) ToolHandler {
+			return rootHandler{root: root}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() { srv.Close() })
+
+	c, err := Dial(sockPath) // no root
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	r, err := NewToolProxy(c).CallTool("greet", map[string]any{"name": "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// root is empty string
+	if r.Text != "hello, test from !" {
+		t.Fatalf("expected empty root, got %q", r.Text)
 	}
 }
 
