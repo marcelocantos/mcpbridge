@@ -25,8 +25,9 @@ type DaemonConfig struct {
 
 	// HandlerFactory creates a per-connection handler given the project
 	// root from the client handshake. When set, it takes priority over
-	// Handler.
-	HandlerFactory func(root string) ToolHandler
+	// Handler. The optional cleanup function (if non-nil) is called when
+	// the connection closes.
+	HandlerFactory func(root string) (handler ToolHandler, cleanup func())
 
 	// ExtraMethods registers additional RPC methods beyond ListTools
 	// and CallTool. Each function receives raw JSON params and returns
@@ -38,7 +39,7 @@ type DaemonConfig struct {
 type Server struct {
 	tools          []mcp.Tool
 	handler        ToolHandler
-	handlerFactory func(string) ToolHandler
+	handlerFactory func(string) (ToolHandler, func())
 	extraMethods   map[string]MethodFunc
 	listener       net.Listener
 
@@ -135,7 +136,11 @@ func (s *Server) handleConn(conn net.Conn) {
 	// Determine handler for this connection.
 	handler := s.handler
 	if s.handlerFactory != nil {
-		handler = s.handlerFactory(hs.Root)
+		var cleanup func()
+		handler, cleanup = s.handlerFactory(hs.Root)
+		if cleanup != nil {
+			defer cleanup()
+		}
 	}
 
 	for scanner.Scan() {

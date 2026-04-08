@@ -242,8 +242,8 @@ func TestHandlerFactory(t *testing.T) {
 	srv, err := NewServer(DaemonConfig{
 		SocketPath: sockPath,
 		Tools:      testTools(),
-		HandlerFactory: func(root string) ToolHandler {
-			return rootHandler{root: root}
+		HandlerFactory: func(root string) (ToolHandler, func()) {
+			return rootHandler{root: root}, nil
 		},
 	})
 	if err != nil {
@@ -293,8 +293,8 @@ func TestHandlerFactoryOverridesHandler(t *testing.T) {
 		SocketPath: sockPath,
 		Tools:      testTools(),
 		Handler:    testHandler{}, // would return "hello, alice!"
-		HandlerFactory: func(root string) ToolHandler {
-			return rootHandler{root: root}
+		HandlerFactory: func(root string) (ToolHandler, func()) {
+			return rootHandler{root: root}, nil
 		},
 	})
 	if err != nil {
@@ -325,8 +325,8 @@ func TestDialWithoutRoot(t *testing.T) {
 	srv, err := NewServer(DaemonConfig{
 		SocketPath: sockPath,
 		Tools:      testTools(),
-		HandlerFactory: func(root string) ToolHandler {
-			return rootHandler{root: root}
+		HandlerFactory: func(root string) (ToolHandler, func()) {
+			return rootHandler{root: root}, nil
 		},
 	})
 	if err != nil {
@@ -348,6 +348,47 @@ func TestDialWithoutRoot(t *testing.T) {
 	// root is empty string
 	if r.Text != "hello, test from !" {
 		t.Fatalf("expected empty root, got %q", r.Text)
+	}
+}
+
+func TestHandlerFactoryCleanup(t *testing.T) {
+	// Verify that the cleanup function is called when the connection closes.
+	sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("mcptest-cleanup-%d.sock", time.Now().UnixNano()))
+	t.Cleanup(func() { os.Remove(sockPath) })
+
+	cleaned := make(chan string, 2)
+	srv, err := NewServer(DaemonConfig{
+		SocketPath: sockPath,
+		Tools:      testTools(),
+		HandlerFactory: func(root string) (ToolHandler, func()) {
+			return rootHandler{root: root}, func() { cleaned <- root }
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() { srv.Close() })
+
+	// Open and close a connection.
+	c, err := Dial(sockPath, "/cleanup/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Make a call to confirm it works.
+	if _, err := NewToolProxy(c).CallTool("greet", map[string]any{"name": "x"}); err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+
+	// Wait for cleanup.
+	select {
+	case root := <-cleaned:
+		if root != "/cleanup/test" {
+			t.Fatalf("expected root /cleanup/test, got %q", root)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup was not called within 2 seconds")
 	}
 }
 
