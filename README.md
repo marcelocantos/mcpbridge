@@ -1,0 +1,58 @@
+# mcpbridge
+
+Keep your MCP server sessions alive across upgrades.
+
+mcpbridge is split into two processes:
+
+- **`mcpbridge`** (C) — a tiny wrapper that your MCP client launches in
+  place of the real MCP server. It spawns the real server as a child,
+  speaks MCP transparently to the upstream agent, and cycles the child
+  when told to — without interrupting the session.
+- **`mcpbridge-daemon`** (Go) — one long-lived process per user session,
+  typically run under `brew services`. It reads per-server config files,
+  polls upgrade sources (Homebrew formulas, GitHub releases), performs
+  the upgrades, and tells connected wrappers when it's time to reload.
+
+The two processes talk over a Unix domain socket. When the daemon isn't
+running, the wrapper still works — it just runs as a pure bridge with
+no upgrade handling.
+
+## Why two languages?
+
+The wrapper is C for longevity: boring C compiles unchanged for decades
+and has minimal runtime surface. It runs per MCP server, so keeping it
+tiny matters.
+
+The daemon runs exactly once per user session, so its resource
+footprint is irrelevant. Go gets us HTTPS, JSON, fsnotify, goroutines,
+and a mature standard library essentially for free — and the code that
+talks to `api.github.com` and Homebrew benefits from all of that.
+
+## History
+
+Earlier commits of this repo contained a Go library for building
+daemon+proxy MCP servers. That library had a single consumer and served
+a different problem (daemonising MCP servers so expensive state would
+survive proxy restarts). It has been removed; the consumer will be
+reworked separately to target the new binary pair.
+
+## Status
+
+Work in progress. See `docs/targets.yaml` for the roadmap.
+
+## Build
+
+```sh
+make            # builds both wrapper and daemon
+make test       # runs both test suites
+./wrapper/mcpbridge --version
+./daemon/mcpbridge-daemon --version
+```
+
+Requires a C11 compiler, POSIX.1-2008, and Go 1.24 or later. Supported
+platforms: macOS arm64 and Linux x86_64 / arm64.
+
+## License
+
+Apache 2.0. See `LICENSE`. Vendored third-party code retains its own
+license — see `wrapper/vendor/cjson/LICENSE` for cJSON.
