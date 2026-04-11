@@ -30,6 +30,7 @@ targets:
     - T1.11
     - T1.12
     - T1.13
+    - T1.14
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -165,6 +166,28 @@ targets:
     context: Second source backend. Unlike brew, github hits the network directly from Go — api.github.com for the release metadata and github.com for asset downloads. Supports plain-binary assets and .tar.gz archives (single-file extraction). Tests use httptest.NewServer to stand up a fake GitHub API so the test suite never touches the real network.
     depends_on:
     - T1.11
+    origin: manual
+    discovered: 2026-04-12
+    achieved: 2026-04-12
+  T1.14:
+    name: The daemon has a polling scheduler that calls every configured source backend on its own check_interval, triggers the install path when a new version is detected (in auto mode), and broadcasts a targeted reload to the right wrapper.
+    status: achieved
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - daemon/internal/scheduler/scheduler.go defines a Scheduler with Run(ctx) and per-config poll loops
+    - 'Brew path: calls Outdated; if a new version exists AND upgrade mode is auto, calls Upgrade; then broadcasts a targeted reload; in notify mode logs and does not broadcast'
+    - 'GitHub path: caches the last-seen tag so first-run establishes baseline without spurious upgrades; when the tag changes AND mode is auto, calls Install with the registered wrapper''s child_binary as destPath; broadcasts a targeted reload'
+    - socket.Server grows ReloadName(name, reason) int that only sends reload envelopes to wrappers registered with that exact name; returns the count notified
+    - socket.Server grows ChildBinaryForName(name) string so the scheduler can resolve where to install github-sourced binaries
+    - Source backends are accepted via interfaces so scheduler_test.go can drive them with stubs; no network, no brew, no files touched in tests
+    - 'scheduler_test.go covers: brew auto upgrade broadcasts, brew notify-only does not broadcast, github first-run baselines without action, github second-run with new tag broadcasts, broadcast skipped when no wrapper is registered for the name, and clean shutdown on context cancel'
+    - daemon main.go constructs and runs the scheduler in a goroutine after the socket server starts, and stops cleanly on SIGINT/SIGTERM
+    context: Glue layer that makes T1.11 (configs) + T1.12 (brew) + T1.13 (github) actually do something. One goroutine per config, ticks on cfg.CheckInterval, uses interface seams so tests can inject fake sources and fake broadcasters. Adds a targeted ReloadName method to socket.Server so the scheduler only reloads the wrappers for the upgraded config, not every connected wrapper.
+    depends_on:
+    - T1.11
+    - T1.12
+    - T1.13
     origin: manual
     discovered: 2026-04-12
     achieved: 2026-04-12

@@ -25,7 +25,9 @@ import (
 	"syscall"
 
 	"github.com/marcelocantos/mcpbridge/daemon/internal/config"
+	"github.com/marcelocantos/mcpbridge/daemon/internal/scheduler"
 	"github.com/marcelocantos/mcpbridge/daemon/internal/socket"
+	"github.com/marcelocantos/mcpbridge/daemon/internal/source"
 )
 
 // Version is injected at build time via -ldflags "-X main.Version=...".
@@ -155,6 +157,17 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Scheduler: one goroutine per config, polls on interval, uses
+	// the brew and github source backends, and broadcasts targeted
+	// reloads through the socket server.
+	sched := scheduler.New(
+		cfgLoad.Configs,
+		source.NewBrew(),
+		source.NewGitHub(),
+		srv,
+	)
+	go sched.Run(ctx)
 
 	// Signal routing. SIGHUP triggers a manual reload broadcast;
 	// SIGINT/SIGTERM cancels the context which unblocks Run.

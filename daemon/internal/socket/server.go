@@ -149,8 +149,8 @@ func (s *Server) Registrations() []Registration {
 }
 
 // BroadcastReload pushes a reload envelope to every registered
-// wrapper with the given reason. Intended to be triggered by SIGHUP
-// in v1 and by the source-backend scheduler in later targets.
+// wrapper with the given reason. Used by SIGHUP as a "reload
+// everything" knob.
 func (s *Server) BroadcastReload(reason string) {
 	s.mu.Lock()
 	conns := make([]*conn, 0, len(s.conns))
@@ -173,6 +173,52 @@ func (s *Server) BroadcastReload(reason string) {
 				"name", c.reg.Name, "err", err)
 		}
 	}
+}
+
+// ReloadName sends a reload envelope only to the wrappers currently
+// registered with the given name. Used by the scheduler when one
+// specific config has detected a new version. Returns the number
+// of wrappers that were notified (0 when no wrapper is registered
+// for that name — the scheduler treats that as "no one cares").
+func (s *Server) ReloadName(name, reason string) int {
+	s.mu.Lock()
+	matches := make([]*conn, 0, 2)
+	for _, c := range s.conns {
+		if c.reg != nil && c.reg.Name == name {
+			matches = append(matches, c)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, c := range matches {
+		env := &Envelope{
+			Type:   TypeReload,
+			Seq:    c.nextSeq(),
+			Name:   name,
+			Reason: reason,
+		}
+		if err := c.send(env); err != nil {
+			slog.Warn("reload: send failed", "name", name, "err", err)
+		}
+	}
+	return len(matches)
+}
+
+// ChildBinaryForName returns the child_binary path reported by a
+// wrapper registered with the given name, or "" if no wrapper is
+// currently registered. The scheduler uses this to know where to
+// write a freshly downloaded GitHub release asset. If multiple
+// wrappers are registered for the same name (unusual but legal),
+// the first one encountered wins.
+func (s *Server) ChildBinaryForName(name string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.conns {
+		if c.reg != nil && c.reg.Name == name {
+			return c.reg.ChildBinary
+		}
+	}
+	return ""
 }
 
 // BroadcastShutdown pushes a shutdown envelope to every wrapper and

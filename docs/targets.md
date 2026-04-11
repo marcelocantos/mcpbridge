@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12, 🎯T1.13
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12, 🎯T1.13, 🎯T1.14
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -66,6 +66,24 @@
   - No third-party dependencies — uses only net/http, encoding/json, archive/tar, compress/gzip, crypto/sha256
 - **Context**: Second source backend. Unlike brew, github hits the network directly from Go — api.github.com for the release metadata and github.com for asset downloads. Supports plain-binary assets and .tar.gz archives (single-file extraction). Tests use httptest.NewServer to stand up a fake GitHub API so the test suite never touches the real network.
 - **Depends on**: 🎯T1.11
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.14 The daemon has a polling scheduler that calls every configured source backend on its own check_interval, triggers the install path when a new version is detected (in auto mode), and broadcasts a targeted reload to the right wrapper.
+- **Value**: 8
+- **Cost**: 5
+- **Acceptance**:
+  - daemon/internal/scheduler/scheduler.go defines a Scheduler with Run(ctx) and per-config poll loops
+  - Brew path: calls Outdated; if a new version exists AND upgrade mode is auto, calls Upgrade; then broadcasts a targeted reload; in notify mode logs and does not broadcast
+  - GitHub path: caches the last-seen tag so first-run establishes baseline without spurious upgrades; when the tag changes AND mode is auto, calls Install with the registered wrapper's child_binary as destPath; broadcasts a targeted reload
+  - socket.Server grows ReloadName(name, reason) int that only sends reload envelopes to wrappers registered with that exact name; returns the count notified
+  - socket.Server grows ChildBinaryForName(name) string so the scheduler can resolve where to install github-sourced binaries
+  - Source backends are accepted via interfaces so scheduler_test.go can drive them with stubs; no network, no brew, no files touched in tests
+  - scheduler_test.go covers: brew auto upgrade broadcasts, brew notify-only does not broadcast, github first-run baselines without action, github second-run with new tag broadcasts, broadcast skipped when no wrapper is registered for the name, and clean shutdown on context cancel
+  - daemon main.go constructs and runs the scheduler in a goroutine after the socket server starts, and stops cleanly on SIGINT/SIGTERM
+- **Context**: Glue layer that makes T1.11 (configs) + T1.12 (brew) + T1.13 (github) actually do something. One goroutine per config, ticks on cfg.CheckInterval, uses interface seams so tests can inject fake sources and fake broadcasters. Adds a targeted ReloadName method to socket.Server so the scheduler only reloads the wrappers for the upgraded config, not every connected wrapper.
+- **Depends on**: 🎯T1.11, 🎯T1.12, 🎯T1.13
 - **Status**: Achieved
 - **Discovered**: 2026-04-12
 - **Achieved**: 2026-04-12
