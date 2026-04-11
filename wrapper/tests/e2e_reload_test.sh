@@ -50,6 +50,10 @@ cleanup() {
     [ -n "${WRAPPER_PID:-}" ] && kill -TERM "$WRAPPER_PID" 2>/dev/null || true
     [ -n "${DAEMON_PID:-}" ]  && kill -TERM "$DAEMON_PID"  2>/dev/null || true
     wait 2>/dev/null || true
+    if [ "${MCPBRIDGE_KEEP_E2E_LOGS:-}" = "1" ]; then
+        echo "reload e2e: logs preserved at $WRAPPER_OUT $WRAPPER_ERR $DAEMON_ERR" >&2
+        return
+    fi
     rm -f "$WRAPPER_OUT" "$WRAPPER_ERR" "$DAEMON_ERR" "$INPUT_FIFO" "$SOCK"
 }
 trap cleanup EXIT
@@ -78,9 +82,13 @@ MCPBRIDGE_SOCKET="$SOCK" "$WRAPPER" -v -- "$CHILD" \
     <"$INPUT_FIFO" >"$WRAPPER_OUT" 2>"$WRAPPER_ERR" &
 WRAPPER_PID=$!
 
-# Open the FIFO for writing on fd 3 so it stays open until we close
-# it explicitly. The writer below pipes messages to fd 3.
-exec 3>"$INPUT_FIFO"
+# Open the FIFO for both reading and writing on fd 3 so there is
+# always at least one writer (us) holding the FIFO open, even
+# transiently while the wrapper child is still exec'ing. Without
+# this, the wrapper's blocking open(RDONLY) can race with the
+# shell's exec 3>FIFO, causing the first printf to see EPIPE when
+# the wrapper briefly has no open read-fd yet.
+exec 3<>"$INPUT_FIFO"
 
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"reload-e2e","version":"1"}}}'
 INITED='{"jsonrpc":"2.0","method":"notifications/initialized"}'

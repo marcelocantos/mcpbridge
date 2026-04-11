@@ -28,6 +28,7 @@ targets:
     - T1.9
     - T1.10
     - T1.11
+    - T1.12
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -129,6 +130,23 @@ targets:
     context: First piece of daemon config loading. The wire protocol already reserves config_found in register_ok, but until now the daemon always returned false because there was no loader. This target lands a small config package (parse, validate, discover), plus the integration with the socket server so wrappers get the truthful answer. Source backends (brew, github) and the polling scheduler come in later targets; this one only gets to "the daemon knows which servers have configs."
     depends_on:
     - T1.8
+    origin: manual
+    discovered: 2026-04-12
+    achieved: 2026-04-12
+  T1.12:
+    name: The daemon has a brew upgrade source backend (daemon/internal/source/brew.go) that can detect when a wrapped formula is outdated and execute the upgrade, backed by `brew outdated --json=v2` and `brew upgrade`.
+    status: achieved
+    value: 5.0
+    cost: 3.0
+    acceptance:
+    - daemon/internal/source/brew.go defines a Brew struct with Outdated(ctx, formula) (*OutdatedInfo, error) and Upgrade(ctx, formula) error methods
+    - OutdatedInfo carries the installed_version and current_version strings as parsed from `brew outdated --json=v2`; if the formula is not outdated the method returns (nil, nil)
+    - The exec side is behind a function-pointer seam so tests can inject a fake brew binary without touching PATH or the host's real brew
+    - 'brew_test.go covers: outdated response with the formula present, outdated response with the formula absent (-> nil), malformed JSON (-> error), brew exit nonzero (-> error), and the upgrade happy path'
+    - The package doc comment names the backing commands and notes that standard-out is parsed as JSON while standard-error is surfaced in error messages
+    context: First real source backend. Pure library for now — it exposes Outdated and Upgrade methods that take a formula name and shell out to the real brew binary. The scheduler that actually calls them (on a timer) and the fsnotify integration for out-of-band detection come in T1.14. Github source lands separately in T1.13 because it needs HTTPS + download + SHA256 machinery that has nothing in common with the brew path.
+    depends_on:
+    - T1.11
     origin: manual
     discovered: 2026-04-12
     achieved: 2026-04-12

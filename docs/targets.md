@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -36,6 +36,21 @@
   - Existing daemon tests updated to use a stub lookup so no regressions
 - **Context**: First piece of daemon config loading. The wire protocol already reserves config_found in register_ok, but until now the daemon always returned false because there was no loader. This target lands a small config package (parse, validate, discover), plus the integration with the socket server so wrappers get the truthful answer. Source backends (brew, github) and the polling scheduler come in later targets; this one only gets to "the daemon knows which servers have configs."
 - **Depends on**: 🎯T1.8
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.12 The daemon has a brew upgrade source backend (daemon/internal/source/brew.go) that can detect when a wrapped formula is outdated and execute the upgrade, backed by `brew outdated --json=v2` and `brew upgrade`.
+- **Value**: 5
+- **Cost**: 3
+- **Acceptance**:
+  - daemon/internal/source/brew.go defines a Brew struct with Outdated(ctx, formula) (*OutdatedInfo, error) and Upgrade(ctx, formula) error methods
+  - OutdatedInfo carries the installed_version and current_version strings as parsed from `brew outdated --json=v2`; if the formula is not outdated the method returns (nil, nil)
+  - The exec side is behind a function-pointer seam so tests can inject a fake brew binary without touching PATH or the host's real brew
+  - brew_test.go covers: outdated response with the formula present, outdated response with the formula absent (-> nil), malformed JSON (-> error), brew exit nonzero (-> error), and the upgrade happy path
+  - The package doc comment names the backing commands and notes that standard-out is parsed as JSON while standard-error is surfaced in error messages
+- **Context**: First real source backend. Pure library for now — it exposes Outdated and Upgrade methods that take a formula name and shell out to the real brew binary. The scheduler that actually calls them (on a timer) and the fsnotify integration for out-of-band detection come in T1.14. Github source lands separately in T1.13 because it needs HTTPS + download + SHA256 machinery that has nothing in common with the brew path.
+- **Depends on**: 🎯T1.11
 - **Status**: Achieved
 - **Discovered**: 2026-04-12
 - **Achieved**: 2026-04-12
