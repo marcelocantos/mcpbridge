@@ -98,11 +98,13 @@ tests/dispatch_test: tests/dispatch_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/dispatch_test.o \
 	    $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
-test: $(TEST_BINS)
+test: $(TEST_BINS) $(BIN) $(TEST_HELPERS)
 	@set -e; for t in $(TEST_BINS); do \
 	    echo "==> $$t"; \
 	    ./$$t; \
 	done
+	@echo "==> tests/e2e_wrapper_test.sh"
+	@./tests/e2e_wrapper_test.sh
 
 clean:
 	rm -f $(BIN) $(MAIN_OBJS) $(TEST_BINS) $(TEST_HELPERS) \

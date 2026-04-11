@@ -22,6 +22,7 @@ targets:
     - T1.4
     - T1.5
     - T1.6
+    - T1.7
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -137,6 +138,27 @@ targets:
     depends_on:
     - T1.3
     - T1.4
+    origin: manual
+    discovered: 2026-04-11
+    achieved: 2026-04-11
+  T1.7:
+    name: The wrapper has a working main event loop in main.c that wires argv parsing + transport + FSM + dispatch into a runnable binary that transparently proxies an MCP child, enabling a first end-to-end smoke test.
+    status: achieved
+    value: 8.0
+    cost: 5.0
+    acceptance:
+    - wrapper/src/main.c parses argv for the `--` delimiter and treats everything after as the wrapped command + argv
+    - main() constructs transport_stdio, fsm, dispatch, and a sink that blocking-writes to STDOUT (upstream) and to the transport write_fd (child)
+    - The sink's emit_event callback feeds the FSM and then calls dispatch_on_state_change on the new state
+    - The main poll() loop watches upstream stdin and the transport read_fd, feeds bytes into mcp_readers, and dispatches each popped line through mcp_msg_parse + dispatch_on_upstream / dispatch_on_child
+    - Child pipe EOF triggers FSM_EV_CHILD_EXIT; the wrapper reaps the child via transport_stdio_reap and then stops cleanly
+    - Upstream stdin EOF triggers a graceful transport_stop and exit
+    - Parse errors on either side are logged and do not crash
+    - wrapper/tests/e2e_wrapper_test.sh spawns the built mcpbridge wrapping tests/fake_echo, writes a JSON-RPC line to it, reads the identical line back from mcpbridge's stdout, asserts success, and is run via `make test`
+    context: 'First end-to-end wiring. This takes the pure modules (parser, FSM, dispatch, transport) and glues them into a runnable mcpbridge binary that an MCP client can launch. Minimum-viable: no daemon connection yet, no reload path, no signal handling beyond SIGTERM/SIGINT cleanup. Child death (detected via pipe EOF, not SIGCHLD yet) exits the wrapper. An integration test sanity-checks the pipeline by running the wrapper against fake_echo.'
+    depends_on:
+    - T1.5
+    - T1.6
     origin: manual
     discovered: 2026-04-11
     achieved: 2026-04-11

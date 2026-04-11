@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -122,6 +122,24 @@
   - make test passes dispatch_test
 - **Context**: The dispatch layer is the "business logic" that sits between the parsed MCP messages and the event loop. This target is the minimum-viable slice: message routing based on state, in-flight counter that drives DRAINING, and first-initialize-response detection. Initialize replay on child restart, tools/list caching and diffing, and the notifications/tools/list_changed emission path are deferred to 🎯T1.6a so this target stays focused and testable in isolation.
 - **Depends on**: 🎯T1.3, 🎯T1.4
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
+### 🎯T1.7 The wrapper has a working main event loop in main.c that wires argv parsing + transport + FSM + dispatch into a runnable binary that transparently proxies an MCP child, enabling a first end-to-end smoke test.
+- **Value**: 8
+- **Cost**: 5
+- **Acceptance**:
+  - wrapper/src/main.c parses argv for the `--` delimiter and treats everything after as the wrapped command + argv
+  - main() constructs transport_stdio, fsm, dispatch, and a sink that blocking-writes to STDOUT (upstream) and to the transport write_fd (child)
+  - The sink's emit_event callback feeds the FSM and then calls dispatch_on_state_change on the new state
+  - The main poll() loop watches upstream stdin and the transport read_fd, feeds bytes into mcp_readers, and dispatches each popped line through mcp_msg_parse + dispatch_on_upstream / dispatch_on_child
+  - Child pipe EOF triggers FSM_EV_CHILD_EXIT; the wrapper reaps the child via transport_stdio_reap and then stops cleanly
+  - Upstream stdin EOF triggers a graceful transport_stop and exit
+  - Parse errors on either side are logged and do not crash
+  - wrapper/tests/e2e_wrapper_test.sh spawns the built mcpbridge wrapping tests/fake_echo, writes a JSON-RPC line to it, reads the identical line back from mcpbridge's stdout, asserts success, and is run via `make test`
+- **Context**: First end-to-end wiring. This takes the pure modules (parser, FSM, dispatch, transport) and glues them into a runnable mcpbridge binary that an MCP client can launch. Minimum-viable: no daemon connection yet, no reload path, no signal handling beyond SIGTERM/SIGINT cleanup. Child death (detected via pipe EOF, not SIGCHLD yet) exits the wrapper. An integration test sanity-checks the pipeline by running the wrapper against fake_echo.
+- **Depends on**: 🎯T1.5, 🎯T1.6
 - **Status**: Achieved
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11
