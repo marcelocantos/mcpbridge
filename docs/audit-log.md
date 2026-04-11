@@ -7,7 +7,7 @@ format.
 
 ## 2026-04-12 — /release v0.1.0
 
-- **Commit**: pending
+- **Commit**: `ca306cd`
 - **Outcome**: Prepared the project's first release. Added
   `NOTICES.md` (cJSON + fsnotify + golang.org/x/sys attributions),
   `agents-guide.md` (full install walkthrough including the
