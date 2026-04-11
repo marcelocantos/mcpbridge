@@ -24,6 +24,7 @@ targets:
     - T1.6
     - T1.7
     - T1.6.1
+    - T1.8
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -180,6 +181,26 @@ targets:
     depends_on:
     - T1.5
     - T1.6
+    origin: manual
+    discovered: 2026-04-11
+    achieved: 2026-04-11
+  T1.8:
+    name: The daemon has a working UDS server that accepts wrapper connections, performs the hello/register handshake, tracks live wrappers, and can broadcast reload notifications on SIGHUP — following the wire protocol spec verbatim.
+    status: achieved
+    value: 8.0
+    cost: 8.0
+    acceptance:
+    - daemon/internal/socket/path.go resolves the socket path per the wire-protocol spec (MCPBRIDGE_SOCKET env override, ~/Library/Caches/mcpbridge/daemon.sock on macOS, $XDG_RUNTIME_DIR/mcpbridge/daemon.sock on Linux, $TMPDIR/mcpbridge-$UID/daemon.sock fallback)
+    - daemon/internal/socket/protocol.go defines the Envelope and per-type message structs matching the wire spec (hello, hello_ok, register, register_ok, deregister, reload, reload_ack, shutdown, error), with JSON marshal/unmarshal round-trip tests
+    - daemon/internal/socket/server.go implements a Server that listens on the UDS, enforces line framing, speaks the handshake, and exposes Register/Deregister and a Broadcast method for the reload path
+    - Daemon creates the socket parent dir with mode 0700 and the socket with mode 0600
+    - 'daemon/internal/socket/server_test.go starts a real listener on a temp socket and drives it through a fake client goroutine: hello/register, broadcast reload, deregister, clean shutdown'
+    - daemon/cmd/mcpbridge-daemon/main.go wires up the server, installs SIGHUP to broadcast reload, SIGINT/SIGTERM for clean shutdown, runs until stopped
+    - '`go test ./...` in daemon/ passes all new tests'
+    context: 'First real daemon functionality. Scope: socket path resolution per platform, wire-protocol message types matching docs/wire-protocol.md, a listener + connection handler that speaks the protocol, and a registry tracking live wrappers. SIGHUP broadcasts a reload to all connected wrappers with reason=manual — both a useful "check now" knob and the easiest way to test the reload path without source backends or a scheduler. Source backends and the polling scheduler come in later targets.'
+    depends_on:
+    - T1.1
+    - T1.2
     origin: manual
     discovered: 2026-04-11
     achieved: 2026-04-11

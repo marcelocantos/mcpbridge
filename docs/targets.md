@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -157,6 +157,23 @@
   - wrapper/tests/e2e_wrapper_test.sh spawns the built mcpbridge wrapping tests/fake_echo, writes a JSON-RPC line to it, reads the identical line back from mcpbridge's stdout, asserts success, and is run via `make test`
 - **Context**: First end-to-end wiring. This takes the pure modules (parser, FSM, dispatch, transport) and glues them into a runnable mcpbridge binary that an MCP client can launch. Minimum-viable: no daemon connection yet, no reload path, no signal handling beyond SIGTERM/SIGINT cleanup. Child death (detected via pipe EOF, not SIGCHLD yet) exits the wrapper. An integration test sanity-checks the pipeline by running the wrapper against fake_echo.
 - **Depends on**: 🎯T1.5, 🎯T1.6
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
+### 🎯T1.8 The daemon has a working UDS server that accepts wrapper connections, performs the hello/register handshake, tracks live wrappers, and can broadcast reload notifications on SIGHUP — following the wire protocol spec verbatim.
+- **Value**: 8
+- **Cost**: 8
+- **Acceptance**:
+  - daemon/internal/socket/path.go resolves the socket path per the wire-protocol spec (MCPBRIDGE_SOCKET env override, ~/Library/Caches/mcpbridge/daemon.sock on macOS, $XDG_RUNTIME_DIR/mcpbridge/daemon.sock on Linux, $TMPDIR/mcpbridge-$UID/daemon.sock fallback)
+  - daemon/internal/socket/protocol.go defines the Envelope and per-type message structs matching the wire spec (hello, hello_ok, register, register_ok, deregister, reload, reload_ack, shutdown, error), with JSON marshal/unmarshal round-trip tests
+  - daemon/internal/socket/server.go implements a Server that listens on the UDS, enforces line framing, speaks the handshake, and exposes Register/Deregister and a Broadcast method for the reload path
+  - Daemon creates the socket parent dir with mode 0700 and the socket with mode 0600
+  - daemon/internal/socket/server_test.go starts a real listener on a temp socket and drives it through a fake client goroutine: hello/register, broadcast reload, deregister, clean shutdown
+  - daemon/cmd/mcpbridge-daemon/main.go wires up the server, installs SIGHUP to broadcast reload, SIGINT/SIGTERM for clean shutdown, runs until stopped
+  - `go test ./...` in daemon/ passes all new tests
+- **Context**: First real daemon functionality. Scope: socket path resolution per platform, wire-protocol message types matching docs/wire-protocol.md, a listener + connection handler that speaks the protocol, and a registry tracking live wrappers. SIGHUP broadcasts a reload to all connected wrappers with reason=manual — both a useful "check now" knob and the easiest way to test the reload path without source backends or a scheduler. Source backends and the polling scheduler come in later targets.
+- **Depends on**: 🎯T1.1, 🎯T1.2
 - **Status**: Achieved
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11
