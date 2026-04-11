@@ -124,6 +124,7 @@ int mcp_msg_parse(const char *bytes, size_t len, struct mcp_msg *out) {
     } else if (out->method == NULL && out->id.tag != MCP_ID_NONE &&
                (result != NULL || error != NULL)) {
         out->kind = MCP_KIND_RESPONSE;
+        out->is_error = (error != NULL);
     } else {
         mcp_msg_free(out);
         cJSON_Delete(root);

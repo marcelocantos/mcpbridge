@@ -76,6 +76,8 @@ struct mcp_msg {
     char  *method;  /* owned; NUL-terminated; NULL for responses */
     char  *raw;     /* owned; not NUL-terminated */
     size_t raw_len;
+    int    is_error; /* response only: 1 if the envelope carried an
+                       * "error" field rather than a "result" field */
 };
 
 /* Parse one complete MCP message from a byte slice.

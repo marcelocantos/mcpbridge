@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -102,6 +102,26 @@
   - make test passes the transport_stdio_test binary
 - **Context**: The transport abstraction is the boundary between the event loop and the concrete way of talking to the wrapped MCP server. Two implementations are planned: stdio (fork a child process) and localhost HTTP (connect to an HTTP endpoint with SSE). This target lands the interface plus the stdio backend. The HTTP backend comes later (🎯T1.9). The event loop that actually uses these comes in 🎯T1.7.
 - **Depends on**: 🎯T1.1
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
+### 🎯T1.6 The wrapper has a minimum-viable dispatch module that forwards MCP messages between upstream and child based on FSM state, tracks in-flight requests, queues while not RUNNING, and emits INITIALIZE_OK / IN_FLIGHT_ZERO events to the FSM.
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - wrapper/src/dispatch.{h,c} exposes dispatch_new / dispatch_free, plus dispatch_on_upstream / dispatch_on_child / dispatch_on_state_change entry points
+  - Dispatch uses an injected sink (send_upstream / send_child / emit_event callbacks) so it is unit-testable without real I/O
+  - Messages forwarded verbatim (using the raw bytes cached in mcp_msg) — no re-serialisation
+  - When fsm state is RUNNING: upstream requests forward to child and increment in_flight; child responses forward to upstream and decrement in_flight
+  - When fsm state is not RUNNING: upstream messages queue in a FIFO for later replay; child responses still forward through (a dying child may still answer queued requests)
+  - State transition into RUNNING drains the queued upstream messages in order
+  - When in_flight hits zero while fsm state is DRAINING, emit FSM_EV_IN_FLIGHT_ZERO
+  - First initialize response seen from the child emits FSM_EV_INITIALIZE_OK (or FSM_EV_INITIALIZE_FAILED if it contains an error)
+  - wrapper/tests/dispatch_test.c exercises: simple round-trip in RUNNING, queuing while STARTING and drain on RUNNING transition, in-flight counter math, DRAIN -> IN_FLIGHT_ZERO emission, initialize response emits INITIALIZE_OK exactly once
+  - make test passes dispatch_test
+- **Context**: The dispatch layer is the "business logic" that sits between the parsed MCP messages and the event loop. This target is the minimum-viable slice: message routing based on state, in-flight counter that drives DRAINING, and first-initialize-response detection. Initialize replay on child restart, tools/list caching and diffing, and the notifications/tools/list_changed emission path are deferred to 🎯T1.6a so this target stays focused and testable in isolation.
+- **Depends on**: 🎯T1.3, 🎯T1.4
 - **Status**: Achieved
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11

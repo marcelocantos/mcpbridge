@@ -21,6 +21,7 @@ targets:
     - T1.3
     - T1.4
     - T1.5
+    - T1.6
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -113,6 +114,29 @@ targets:
     context: 'The transport abstraction is the boundary between the event loop and the concrete way of talking to the wrapped MCP server. Two implementations are planned: stdio (fork a child process) and localhost HTTP (connect to an HTTP endpoint with SSE). This target lands the interface plus the stdio backend. The HTTP backend comes later (🎯T1.9). The event loop that actually uses these comes in 🎯T1.7.'
     depends_on:
     - T1.1
+    origin: manual
+    discovered: 2026-04-11
+    achieved: 2026-04-11
+  T1.6:
+    name: The wrapper has a minimum-viable dispatch module that forwards MCP messages between upstream and child based on FSM state, tracks in-flight requests, queues while not RUNNING, and emits INITIALIZE_OK / IN_FLIGHT_ZERO events to the FSM.
+    status: achieved
+    value: 5.0
+    cost: 5.0
+    acceptance:
+    - wrapper/src/dispatch.{h,c} exposes dispatch_new / dispatch_free, plus dispatch_on_upstream / dispatch_on_child / dispatch_on_state_change entry points
+    - Dispatch uses an injected sink (send_upstream / send_child / emit_event callbacks) so it is unit-testable without real I/O
+    - Messages forwarded verbatim (using the raw bytes cached in mcp_msg) — no re-serialisation
+    - 'When fsm state is RUNNING: upstream requests forward to child and increment in_flight; child responses forward to upstream and decrement in_flight'
+    - 'When fsm state is not RUNNING: upstream messages queue in a FIFO for later replay; child responses still forward through (a dying child may still answer queued requests)'
+    - State transition into RUNNING drains the queued upstream messages in order
+    - When in_flight hits zero while fsm state is DRAINING, emit FSM_EV_IN_FLIGHT_ZERO
+    - First initialize response seen from the child emits FSM_EV_INITIALIZE_OK (or FSM_EV_INITIALIZE_FAILED if it contains an error)
+    - 'wrapper/tests/dispatch_test.c exercises: simple round-trip in RUNNING, queuing while STARTING and drain on RUNNING transition, in-flight counter math, DRAIN -> IN_FLIGHT_ZERO emission, initialize response emits INITIALIZE_OK exactly once'
+    - make test passes dispatch_test
+    context: 'The dispatch layer is the "business logic" that sits between the parsed MCP messages and the event loop. This target is the minimum-viable slice: message routing based on state, in-flight counter that drives DRAINING, and first-initialize-response detection. Initialize replay on child restart, tools/list caching and diffing, and the notifications/tools/list_changed emission path are deferred to 🎯T1.6a so this target stays focused and testable in isolation.'
+    depends_on:
+    - T1.3
+    - T1.4
     origin: manual
     discovered: 2026-04-11
     achieved: 2026-04-11
