@@ -2,6 +2,10 @@
 
 ## Active
 
+(none)
+
+## Achieved
+
 ### 🎯T1 A generic C wrapper transparently proxies any stdio MCP server with automatic upgrade detection and execution, keeping the agent's MCP session alive across child restarts.
 - **Value**: 8
 - **Cost**: 13
@@ -16,11 +20,10 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12, 🎯T1.13, 🎯T1.14, 🎯T1.15
-- **Status**: Identified
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12, 🎯T1.13, 🎯T1.14, 🎯T1.15, 🎯T1.16
+- **Status**: Achieved
 - **Discovered**: 2026-04-11
-
-## Achieved
+- **Achieved**: 2026-04-12
 
 ### 🎯T1.11 The daemon loads per-server JSON config files from ~/.config/mcpbridge and wires config lookups into the socket server so register_ok reports config_found=true when a matching name exists.
 - **Value**: 5
@@ -101,6 +104,22 @@
   - daemon main.go constructs the watcher, passes its OnRegister/OnDeregister callback into NewServer, and runs the watcher alongside the scheduler
 - **Context**: Complements the scheduler: the scheduler catches upgrades we drove ourselves, the watcher catches upgrades the user drove via their own tooling. Uses fsnotify to watch the parent directory of each registered binary (fsnotify doesn't reliably catch writes to a single file), filters events to tracked names, and calls ReloadName on match. First third-party dependency in the daemon.
 - **Depends on**: 🎯T1.14
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.16 The repo carries a Homebrew formula for the mcpbridge tap that installs both binaries, ships a brew service definition for the daemon, and lays out the config directories; README and docs describe the install + configure workflow.
+- **Value**: 5
+- **Cost**: 3
+- **Acceptance**:
+  - packaging/homebrew/mcpbridge.rb is a valid Homebrew formula that depends_on 'go' (build-only), runs the top-level make with VERSION=#{version}, installs wrapper/mcpbridge and daemon/mcpbridge-daemon into bin, and creates etc/mcpbridge + share/mcpbridge directories
+  - The formula has a service do ... end block that runs the daemon with keep_alive and sensible log paths, usable via brew services start mcpbridge
+  - The formula's test block exercises --version on both binaries
+  - docs/config-schema.md documents the JSON schema shared between wrapper and daemon (schema, name, source types, upgrade modes, check_interval)
+  - docs/packaging.md walks through: add the tap, brew install, brew services start mcpbridge, drop a config into ~/.config/mcpbridge/, point your MCP client at mcpbridge wrapping the real server
+  - README.md grows a Quick start section pointing at the packaging doc and the config schema
+- **Context**: Packaging layer. Covers the formula file, a brew service block, and the documentation someone needs to go from "git clone" to "the daemon is running under brew services and mnemo auto-upgrades." Publishing the formula to marcelocantos/homebrew-tap and the GitHub Actions release workflow that bumps its sha256 are separate follow-ups.
+- **Depends on**: 🎯T1.15
 - **Status**: Achieved
 - **Discovered**: 2026-04-12
 - **Achieved**: 2026-04-12
@@ -327,10 +346,3 @@
 - **Status**: Achieved
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11
-
-## Graph
-
-```mermaid
-graph TD
-    T1["A generic C wrapper transpare…"]
-```

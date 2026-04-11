@@ -1,7 +1,7 @@
 targets:
   T1:
     name: A generic C wrapper transparently proxies any stdio MCP server with automatic upgrade detection and execution, keeping the agent's MCP session alive across child restarts.
-    status: identified
+    status: achieved
     value: 8.0
     cost: 13.0
     acceptance:
@@ -32,8 +32,10 @@ targets:
     - T1.13
     - T1.14
     - T1.15
+    - T1.16
     origin: manual
     discovered: 2026-04-11
+    achieved: 2026-04-12
   T1.1:
     name: 'Repo is reshaped for the wrapper+daemon split: Go library deleted; wrapper/ (C) builds a stub mcpbridge binary; daemon/ (Go) builds a stub mcpbridge-daemon binary; top-level Makefile orchestrates both.'
     status: achieved
@@ -208,6 +210,24 @@ targets:
     context: 'Complements the scheduler: the scheduler catches upgrades we drove ourselves, the watcher catches upgrades the user drove via their own tooling. Uses fsnotify to watch the parent directory of each registered binary (fsnotify doesn''t reliably catch writes to a single file), filters events to tracked names, and calls ReloadName on match. First third-party dependency in the daemon.'
     depends_on:
     - T1.14
+    origin: manual
+    discovered: 2026-04-12
+    achieved: 2026-04-12
+  T1.16:
+    name: The repo carries a Homebrew formula for the mcpbridge tap that installs both binaries, ships a brew service definition for the daemon, and lays out the config directories; README and docs describe the install + configure workflow.
+    status: achieved
+    value: 5.0
+    cost: 3.0
+    acceptance:
+    - packaging/homebrew/mcpbridge.rb is a valid Homebrew formula that depends_on 'go' (build-only), runs the top-level make with VERSION=#{version}, installs wrapper/mcpbridge and daemon/mcpbridge-daemon into bin, and creates etc/mcpbridge + share/mcpbridge directories
+    - The formula has a service do ... end block that runs the daemon with keep_alive and sensible log paths, usable via brew services start mcpbridge
+    - The formula's test block exercises --version on both binaries
+    - docs/config-schema.md documents the JSON schema shared between wrapper and daemon (schema, name, source types, upgrade modes, check_interval)
+    - 'docs/packaging.md walks through: add the tap, brew install, brew services start mcpbridge, drop a config into ~/.config/mcpbridge/, point your MCP client at mcpbridge wrapping the real server'
+    - README.md grows a Quick start section pointing at the packaging doc and the config schema
+    context: Packaging layer. Covers the formula file, a brew service block, and the documentation someone needs to go from "git clone" to "the daemon is running under brew services and mnemo auto-upgrades." Publishing the formula to marcelocantos/homebrew-tap and the GitHub Actions release workflow that bumps its sha256 are separate follow-ups.
+    depends_on:
+    - T1.15
     origin: manual
     discovered: 2026-04-12
     achieved: 2026-04-12

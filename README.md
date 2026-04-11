@@ -36,11 +36,25 @@ a different problem (daemonising MCP servers so expensive state would
 survive proxy restarts). It has been removed; the consumer will be
 reworked separately to target the new binary pair.
 
+## Quick start
+
+```sh
+brew tap marcelocantos/tap
+brew install mcpbridge
+brew services start mcpbridge
+```
+
+Drop a per-server config in `~/.config/mcpbridge/`
+(see [docs/config-schema.md](docs/config-schema.md)) and point
+your MCP client at `mcpbridge` in place of the real server.
+The full walkthrough is in
+[docs/packaging.md](docs/packaging.md).
+
 ## Status
 
 Work in progress. See `docs/targets.yaml` for the roadmap.
 
-## Build
+## Build from source
 
 ```sh
 make            # builds both wrapper and daemon
