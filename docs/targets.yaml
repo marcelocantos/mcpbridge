@@ -19,6 +19,7 @@ targets:
     - T1.1
     - T1.2
     - T1.3
+    - T1.4
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -71,6 +72,24 @@ targets:
     - 'wrapper/tests/mcp_test.c unit-tests every function with golden inputs: well-formed initialize, well-formed tools/list, well-formed tools/call, a notification with no id, a malformed message, a message at the size cap, an id that is a string, and an id that is a float (rejected cleanly)'
     - make test passes the mcp_test binary
     context: 'The wrapper needs to parse MCP messages to do its job: it must recognise initialize (for caching + replay), tools/list (for diffing), tools/call (for in-flight id tracking), notifications (pass-through vs emit), and it must produce well-formed MCP messages of its own (replay initialize, emit tools/list_changed). This module is pure: no I/O, no state machine dependencies, just bytes in -> structured view out, and structured form -> bytes out. First real C module after the skeleton; unblocks the state machine (T1.4).'
+    depends_on:
+    - T1.1
+    origin: manual
+    discovered: 2026-04-11
+    achieved: 2026-04-11
+  T1.4:
+    name: The wrapper has a transport-agnostic child-lifecycle state machine (fsm.c / fsm.h) driven by a pure fsm_step(fsm*, event) -> new_state function, unit-tested without any real I/O.
+    status: achieved
+    value: 5.0
+    cost: 3.0
+    acceptance:
+    - wrapper/src/fsm.h defines enum fsm_state, enum fsm_event, struct fsm, and a pure fsm_step function with no I/O dependency
+    - wrapper/src/fsm.c implements fsm_init, fsm_step, fsm_state_name, fsm_event_name, plus respawn-attempt bookkeeping that caps retries and transitions to FAILED on exhaustion
+    - Every valid transition from every non-terminal state is unit-tested
+    - Invalid transitions (e.g., RELOAD while SWAPPING) are unit-tested and leave the state unchanged rather than crashing
+    - 'Respawn exhaustion is tested: repeated CHILD_EXIT while in RESPAWN eventually transitions to FAILED'
+    - make test passes the fsm_test binary with no failures
+    context: The state machine is the coordination spine of the wrapper. It enforces "no upgrade with requests in flight" and "no forwarding while between children" by construction, not by scattered boolean flags. After the daemon-does-the-upgrading pivot, the UPGRADING state disappeared — the wrapper only needs STARTING/RUNNING/DRAINING/SWAPPING/RESPAWN/FAILED. This sub-target lands the pure machine; wiring it into real transports comes later (🎯T1.5).
     depends_on:
     - T1.1
     origin: manual

@@ -36,7 +36,8 @@ endif
 CORE_SRCS  = \
     src/log.c \
     src/util.c \
-    src/mcp.c
+    src/mcp.c \
+    src/fsm.c
 
 MAIN_SRCS  = src/main.c $(CORE_SRCS) $(WATCH_SRC)
 CJSON_SRCS = vendor/cjson/cJSON.c
@@ -44,7 +45,7 @@ CJSON_SRCS = vendor/cjson/cJSON.c
 MAIN_OBJS  = $(MAIN_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
 BIN        = mcpbridge
-TEST_BINS  = tests/smoke_test tests/mcp_test
+TEST_BINS  = tests/smoke_test tests/mcp_test tests/fsm_test
 
 .PHONY: all test clean install
 
@@ -70,6 +71,9 @@ tests/smoke_test: tests/smoke_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
 tests/mcp_test: tests/mcp_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/mcp_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+
+tests/fsm_test: tests/fsm_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/fsm_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
 test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do \
