@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -83,6 +83,24 @@
   - Respawn exhaustion is tested: repeated CHILD_EXIT while in RESPAWN eventually transitions to FAILED
   - make test passes the fsm_test binary with no failures
 - **Context**: The state machine is the coordination spine of the wrapper. It enforces "no upgrade with requests in flight" and "no forwarding while between children" by construction, not by scattered boolean flags. After the daemon-does-the-upgrading pivot, the UPGRADING state disappeared — the wrapper only needs STARTING/RUNNING/DRAINING/SWAPPING/RESPAWN/FAILED. This sub-target lands the pure machine; wiring it into real transports comes later (🎯T1.5).
+- **Depends on**: 🎯T1.1
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
+### 🎯T1.5 The wrapper has a transport abstraction and a stdio implementation that fork/exec a child MCP server with stdin/stdout pipes, exposing read/write fds for the event loop, plus a non-blocking child-reap helper.
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - wrapper/src/transport.h defines struct transport_ops (vtable: start, stop, read_fd, write_fd, read, write, destroy) and struct transport with inline wrapper helpers
+  - wrapper/src/transport_stdio.{h,c} implements the vtable by forking a child, setting up stdin/stdout pipes (stderr inherited), exec'ing the given command+argv, and exposing the parent-side fds
+  - transport_stdio_pid() returns the child pid after start; transport_stdio_reap() does a non-blocking waitpid and reports running/exited/error so the event loop can feed CHILD_EXIT to the FSM
+  - Start-side failure (fork fails, exec fails, pipe fails) is propagated cleanly; the transport object is in a well-defined state after a failed start and can be destroyed safely
+  - Stop closes stdin (so the child sees EOF and exits gracefully), waits briefly for exit, SIGTERMs, waits again, SIGKILLs as last resort
+  - tests/fake_echo.c is a tiny standalone child that reads bytes from stdin and writes them back to stdout verbatim (no libc buffering), used by the integration tests
+  - wrapper/tests/transport_stdio_test.c spawns fake_echo through the transport, round-trips bytes, and verifies clean shutdown with the expected exit status
+  - make test passes the transport_stdio_test binary
+- **Context**: The transport abstraction is the boundary between the event loop and the concrete way of talking to the wrapped MCP server. Two implementations are planned: stdio (fork a child process) and localhost HTTP (connect to an HTTP endpoint with SSE). This target lands the interface plus the stdio backend. The HTTP backend comes later (🎯T1.9). The event loop that actually uses these comes in 🎯T1.7.
 - **Depends on**: 🎯T1.1
 - **Status**: Achieved
 - **Discovered**: 2026-04-11

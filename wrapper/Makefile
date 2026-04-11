@@ -37,15 +37,22 @@ CORE_SRCS  = \
     src/log.c \
     src/util.c \
     src/mcp.c \
-    src/fsm.c
+    src/fsm.c \
+    src/transport_stdio.c
 
 MAIN_SRCS  = src/main.c $(CORE_SRCS) $(WATCH_SRC)
 CJSON_SRCS = vendor/cjson/cJSON.c
 
 MAIN_OBJS  = $(MAIN_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
+# Test-only helpers built as standalone binaries used by integration
+# tests. These are NOT part of TEST_BINS — they are prerequisites of
+# the actual test binaries that invoke them.
+TEST_HELPERS = tests/fake_echo
+
 BIN        = mcpbridge
-TEST_BINS  = tests/smoke_test tests/mcp_test tests/fsm_test
+TEST_BINS  = tests/smoke_test tests/mcp_test tests/fsm_test \
+             tests/transport_stdio_test
 
 .PHONY: all test clean install
 
@@ -75,6 +82,17 @@ tests/mcp_test: tests/mcp_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 tests/fsm_test: tests/fsm_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/fsm_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
+# Standalone test helper: linked by itself, no core deps. Built as
+# a prerequisite of transport_stdio_test because the test invokes it.
+tests/fake_echo: tests/fake_echo.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/fake_echo.o
+
+tests/transport_stdio_test: tests/transport_stdio_test.o \
+                            $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o) \
+                            tests/fake_echo
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/transport_stdio_test.o \
+	    $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+
 test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do \
 	    echo "==> $$t"; \
@@ -82,7 +100,7 @@ test: $(TEST_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(MAIN_OBJS) $(TEST_BINS) \
+	rm -f $(BIN) $(MAIN_OBJS) $(TEST_BINS) $(TEST_HELPERS) \
 	      tests/*.o
 
 install: $(BIN)

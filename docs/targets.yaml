@@ -20,6 +20,7 @@ targets:
     - T1.2
     - T1.3
     - T1.4
+    - T1.5
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -90,6 +91,26 @@ targets:
     - 'Respawn exhaustion is tested: repeated CHILD_EXIT while in RESPAWN eventually transitions to FAILED'
     - make test passes the fsm_test binary with no failures
     context: The state machine is the coordination spine of the wrapper. It enforces "no upgrade with requests in flight" and "no forwarding while between children" by construction, not by scattered boolean flags. After the daemon-does-the-upgrading pivot, the UPGRADING state disappeared — the wrapper only needs STARTING/RUNNING/DRAINING/SWAPPING/RESPAWN/FAILED. This sub-target lands the pure machine; wiring it into real transports comes later (🎯T1.5).
+    depends_on:
+    - T1.1
+    origin: manual
+    discovered: 2026-04-11
+    achieved: 2026-04-11
+  T1.5:
+    name: The wrapper has a transport abstraction and a stdio implementation that fork/exec a child MCP server with stdin/stdout pipes, exposing read/write fds for the event loop, plus a non-blocking child-reap helper.
+    status: achieved
+    value: 5.0
+    cost: 5.0
+    acceptance:
+    - 'wrapper/src/transport.h defines struct transport_ops (vtable: start, stop, read_fd, write_fd, read, write, destroy) and struct transport with inline wrapper helpers'
+    - wrapper/src/transport_stdio.{h,c} implements the vtable by forking a child, setting up stdin/stdout pipes (stderr inherited), exec'ing the given command+argv, and exposing the parent-side fds
+    - transport_stdio_pid() returns the child pid after start; transport_stdio_reap() does a non-blocking waitpid and reports running/exited/error so the event loop can feed CHILD_EXIT to the FSM
+    - Start-side failure (fork fails, exec fails, pipe fails) is propagated cleanly; the transport object is in a well-defined state after a failed start and can be destroyed safely
+    - Stop closes stdin (so the child sees EOF and exits gracefully), waits briefly for exit, SIGTERMs, waits again, SIGKILLs as last resort
+    - tests/fake_echo.c is a tiny standalone child that reads bytes from stdin and writes them back to stdout verbatim (no libc buffering), used by the integration tests
+    - wrapper/tests/transport_stdio_test.c spawns fake_echo through the transport, round-trips bytes, and verifies clean shutdown with the expected exit status
+    - make test passes the transport_stdio_test binary
+    context: 'The transport abstraction is the boundary between the event loop and the concrete way of talking to the wrapped MCP server. Two implementations are planned: stdio (fork a child process) and localhost HTTP (connect to an HTTP endpoint with SSE). This target lands the interface plus the stdio backend. The HTTP backend comes later (🎯T1.9). The event loop that actually uses these comes in 🎯T1.7.'
     depends_on:
     - T1.1
     origin: manual
