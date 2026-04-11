@@ -16,8 +16,15 @@ all: wrapper daemon
 wrapper:
 	$(MAKE) -C wrapper VERSION=$(VERSION)
 
-daemon:
+daemon: daemon/cmd/mcpbridge-daemon/help_agent.md
 	cd daemon && go build -ldflags "-X main.Version=$(VERSION)" -o mcpbridge-daemon ./cmd/mcpbridge-daemon
+
+# daemon/cmd/mcpbridge-daemon/main.go embeds agents-guide.md via
+# //go:embed help_agent.md. The embed directive can only see files
+# in the same package dir, so we stage a copy there before building.
+# The file is gitignored — the copy is a build artifact, not source.
+daemon/cmd/mcpbridge-daemon/help_agent.md: agents-guide.md
+	cp agents-guide.md $@
 
 test: wrapper-test daemon-test
 
@@ -35,7 +42,7 @@ wrapper-clean:
 	$(MAKE) -C wrapper clean
 
 daemon-clean:
-	rm -f daemon/mcpbridge-daemon
+	rm -f daemon/mcpbridge-daemon daemon/cmd/mcpbridge-daemon/help_agent.md
 
 install: wrapper-install daemon-install
 

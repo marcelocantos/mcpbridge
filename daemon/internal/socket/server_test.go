@@ -92,11 +92,18 @@ func dialAndHandshake(t *testing.T, sockPath, name string) (net.Conn, *bufio.Rea
 	return c, br, registerOK
 }
 
+// newServer starts a Server on a short-path socket with a nil
+// ConfigLookup (matches the pre-T1.11 behaviour the existing tests
+// were written against).
 func newServer(t *testing.T) (*Server, func()) {
+	return newServerWithLookup(t, nil)
+}
+
+func newServerWithLookup(t *testing.T, lookup ConfigLookup) (*Server, func()) {
 	t.Helper()
 	dir := shortTempDir(t)
 	sockPath := filepath.Join(dir, "d.sock")
-	srv, err := NewServer(sockPath)
+	srv, err := NewServer(sockPath, lookup)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -110,6 +117,31 @@ func newServer(t *testing.T) (*Server, func()) {
 		cancel()
 		srv.Close()
 		<-done
+	}
+}
+
+func TestServer_RegisterOK_ReportsConfigFoundFromLookup(t *testing.T) {
+	lookup := ConfigLookup(func(name string) (bool, bool) {
+		return name == "mnemo", name == "mnemo"
+	})
+	srv, cleanup := newServerWithLookup(t, lookup)
+	defer cleanup()
+
+	// A wrapper that registers as mnemo should see config_found=true.
+	conn, _, ok := dialAndHandshake(t, srv.SocketPath(), "mnemo")
+	defer conn.Close()
+	if !ok.ConfigFound {
+		t.Errorf("mnemo: want config_found=true, got false")
+	}
+	if !ok.Polling {
+		t.Errorf("mnemo: want polling=true, got false")
+	}
+
+	// A wrapper that registers as something else gets false/false.
+	conn2, _, ok2 := dialAndHandshake(t, srv.SocketPath(), "unknown")
+	defer conn2.Close()
+	if ok2.ConfigFound {
+		t.Errorf("unknown: want config_found=false, got true")
 	}
 }
 

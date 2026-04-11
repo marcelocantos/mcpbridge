@@ -2,6 +2,10 @@
 
 ## Active
 
+(none)
+
+## Achieved
+
 ### 🎯T1 A generic C wrapper transparently proxies any stdio MCP server with automatic upgrade detection and execution, keeping the agent's MCP session alive across child restarts.
 - **Value**: 8
 - **Cost**: 13
@@ -16,11 +20,109 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10
-- **Status**: Identified
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12, 🎯T1.13, 🎯T1.14, 🎯T1.15, 🎯T1.16
+- **Status**: Achieved
 - **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-12
 
-## Achieved
+### 🎯T1.11 The daemon loads per-server JSON config files from ~/.config/mcpbridge and wires config lookups into the socket server so register_ok reports config_found=true when a matching name exists.
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - daemon/internal/config/config.go defines a Config struct matching the schema (schema int, name string, source discriminated union on type, upgrade enum off|notify|auto, check_interval Go duration string)
+  - Supports source types brew (formula) and github (repo, asset, binary_in_archive, checksum_asset). Unknown source types and schema versions are rejected with a descriptive error including the file path
+  - config.Load(dirs ...) walks each listed directory, reads *.json files, parses and validates each, returns a map[string]*Config keyed by name and a slice of per-file errors (so one bad file doesn't break discovery of the rest)
+  - If two files in the same or different directories define the same name, the earlier directory wins and a warning is logged
+  - daemon/internal/config/config_test.go covers: a valid brew config, a valid github config, rejection of a bad schema version, rejection of an unknown source type, rejection of malformed JSON, and discovery of multiple configs across two directories
+  - daemon main.go calls config.Load with the user's ~/.config/mcpbridge/ directory at startup and passes a lookup closure into the socket server
+  - socket.Server.NewServer grows an optional ConfigLookup parameter; register_ok's config_found is populated from the lookup
+  - Existing daemon tests updated to use a stub lookup so no regressions
+- **Context**: First piece of daemon config loading. The wire protocol already reserves config_found in register_ok, but until now the daemon always returned false because there was no loader. This target lands a small config package (parse, validate, discover), plus the integration with the socket server so wrappers get the truthful answer. Source backends (brew, github) and the polling scheduler come in later targets; this one only gets to "the daemon knows which servers have configs."
+- **Depends on**: 🎯T1.8
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.12 The daemon has a brew upgrade source backend (daemon/internal/source/brew.go) that can detect when a wrapped formula is outdated and execute the upgrade, backed by `brew outdated --json=v2` and `brew upgrade`.
+- **Value**: 5
+- **Cost**: 3
+- **Acceptance**:
+  - daemon/internal/source/brew.go defines a Brew struct with Outdated(ctx, formula) (*OutdatedInfo, error) and Upgrade(ctx, formula) error methods
+  - OutdatedInfo carries the installed_version and current_version strings as parsed from `brew outdated --json=v2`; if the formula is not outdated the method returns (nil, nil)
+  - The exec side is behind a function-pointer seam so tests can inject a fake brew binary without touching PATH or the host's real brew
+  - brew_test.go covers: outdated response with the formula present, outdated response with the formula absent (-> nil), malformed JSON (-> error), brew exit nonzero (-> error), and the upgrade happy path
+  - The package doc comment names the backing commands and notes that standard-out is parsed as JSON while standard-error is surfaced in error messages
+- **Context**: First real source backend. Pure library for now — it exposes Outdated and Upgrade methods that take a formula name and shell out to the real brew binary. The scheduler that actually calls them (on a timer) and the fsnotify integration for out-of-band detection come in T1.14. Github source lands separately in T1.13 because it needs HTTPS + download + SHA256 machinery that has nothing in common with the brew path.
+- **Depends on**: 🎯T1.11
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.13 The daemon has a GitHub releases source backend that fetches /releases/latest over HTTPS, downloads and SHA256-verifies the release asset, and atomically replaces the wrapped binary at its installed path.
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - daemon/internal/source/github.go defines a GitHub struct with Latest(ctx, repo) returning tag name + assets, IsNewer(installed, latest), and Install(ctx, cfg, installedVersion, destPath)
+  - Install substitutes {version}, {os}, {arch} in the asset pattern, downloads over HTTPS with a per-request timeout, verifies the SHA256 when the config names a checksum_asset, optionally unpacks a single binary out of a .tar.gz, and atomically renames into destPath (preserving the existing file's mode + ownership)
+  - HTTP side is injectable so tests can stand up an httptest.Server and point the backend at it instead of api.github.com
+  - github_test.go covers: latest-release JSON parsing, IsNewer table-driven cases, asset template substitution, plain-binary install happy path, checksum mismatch rejection, tar.gz extraction happy path
+  - No third-party dependencies — uses only net/http, encoding/json, archive/tar, compress/gzip, crypto/sha256
+- **Context**: Second source backend. Unlike brew, github hits the network directly from Go — api.github.com for the release metadata and github.com for asset downloads. Supports plain-binary assets and .tar.gz archives (single-file extraction). Tests use httptest.NewServer to stand up a fake GitHub API so the test suite never touches the real network.
+- **Depends on**: 🎯T1.11
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.14 The daemon has a polling scheduler that calls every configured source backend on its own check_interval, triggers the install path when a new version is detected (in auto mode), and broadcasts a targeted reload to the right wrapper.
+- **Value**: 8
+- **Cost**: 5
+- **Acceptance**:
+  - daemon/internal/scheduler/scheduler.go defines a Scheduler with Run(ctx) and per-config poll loops
+  - Brew path: calls Outdated; if a new version exists AND upgrade mode is auto, calls Upgrade; then broadcasts a targeted reload; in notify mode logs and does not broadcast
+  - GitHub path: caches the last-seen tag so first-run establishes baseline without spurious upgrades; when the tag changes AND mode is auto, calls Install with the registered wrapper's child_binary as destPath; broadcasts a targeted reload
+  - socket.Server grows ReloadName(name, reason) int that only sends reload envelopes to wrappers registered with that exact name; returns the count notified
+  - socket.Server grows ChildBinaryForName(name) string so the scheduler can resolve where to install github-sourced binaries
+  - Source backends are accepted via interfaces so scheduler_test.go can drive them with stubs; no network, no brew, no files touched in tests
+  - scheduler_test.go covers: brew auto upgrade broadcasts, brew notify-only does not broadcast, github first-run baselines without action, github second-run with new tag broadcasts, broadcast skipped when no wrapper is registered for the name, and clean shutdown on context cancel
+  - daemon main.go constructs and runs the scheduler in a goroutine after the socket server starts, and stops cleanly on SIGINT/SIGTERM
+- **Context**: Glue layer that makes T1.11 (configs) + T1.12 (brew) + T1.13 (github) actually do something. One goroutine per config, ticks on cfg.CheckInterval, uses interface seams so tests can inject fake sources and fake broadcasters. Adds a targeted ReloadName method to socket.Server so the scheduler only reloads the wrappers for the upgraded config, not every connected wrapper.
+- **Depends on**: 🎯T1.11, 🎯T1.12, 🎯T1.13
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.15 The daemon watches each registered wrapper's child_binary path via fsnotify and broadcasts a targeted reload when the file changes out-of-band (e.g. a user-initiated brew upgrade).
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - daemon/internal/watcher/watcher.go defines a Watcher with Start(ctx), Track(name, path), Untrack(name), and a Broadcaster seam for the reload push
+  - Uses github.com/fsnotify/fsnotify (added to daemon/go.mod + go.sum) — no other new deps
+  - Watches the parent directory of each tracked path and matches events against exact basenames so unrelated files in the same dir are ignored
+  - Debounces rapid event bursts (e.g. create -> chmod -> rename) with a short coalescing window so one brew upgrade produces exactly one reload broadcast
+  - socket.Server grows a RegistrationHandler callback so the scheduler/watcher can react to register / deregister events; the existing tests keep working because the callback is optional (nil = ignored)
+  - watcher_test.go touches a real file in t.TempDir() and asserts ReloadName is called exactly once with reason='binary_changed' via a stub Broadcaster
+  - daemon main.go constructs the watcher, passes its OnRegister/OnDeregister callback into NewServer, and runs the watcher alongside the scheduler
+- **Context**: Complements the scheduler: the scheduler catches upgrades we drove ourselves, the watcher catches upgrades the user drove via their own tooling. Uses fsnotify to watch the parent directory of each registered binary (fsnotify doesn't reliably catch writes to a single file), filters events to tracked names, and calls ReloadName on match. First third-party dependency in the daemon.
+- **Depends on**: 🎯T1.14
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.16 The repo carries a Homebrew formula for the mcpbridge tap that installs both binaries, ships a brew service definition for the daemon, and lays out the config directories; README and docs describe the install + configure workflow.
+- **Value**: 5
+- **Cost**: 3
+- **Acceptance**:
+  - packaging/homebrew/mcpbridge.rb is a valid Homebrew formula that depends_on 'go' (build-only), runs the top-level make with VERSION=#{version}, installs wrapper/mcpbridge and daemon/mcpbridge-daemon into bin, and creates etc/mcpbridge + share/mcpbridge directories
+  - The formula has a service do ... end block that runs the daemon with keep_alive and sensible log paths, usable via brew services start mcpbridge
+  - The formula's test block exercises --version on both binaries
+  - docs/config-schema.md documents the JSON schema shared between wrapper and daemon (schema, name, source types, upgrade modes, check_interval)
+  - docs/packaging.md walks through: add the tap, brew install, brew services start mcpbridge, drop a config into ~/.config/mcpbridge/, point your MCP client at mcpbridge wrapping the real server
+  - README.md grows a Quick start section pointing at the packaging doc and the config schema
+- **Context**: Packaging layer. Covers the formula file, a brew service block, and the documentation someone needs to go from "git clone" to "the daemon is running under brew services and mnemo auto-upgrades." Publishing the formula to marcelocantos/homebrew-tap and the GitHub Actions release workflow that bumps its sha256 are separate follow-ups.
+- **Depends on**: 🎯T1.15
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
 
 ### 🎯T1.1 Repo is reshaped for the wrapper+daemon split: Go library deleted; wrapper/ (C) builds a stub mcpbridge binary; daemon/ (Go) builds a stub mcpbridge-daemon binary; top-level Makefile orchestrates both.
 - **Value**: 5
@@ -244,10 +346,3 @@
 - **Status**: Achieved
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11
-
-## Graph
-
-```mermaid
-graph TD
-    T1["A generic C wrapper transpare…"]
-```
