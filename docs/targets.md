@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -122,6 +122,23 @@
   - make test passes dispatch_test
 - **Context**: The dispatch layer is the "business logic" that sits between the parsed MCP messages and the event loop. This target is the minimum-viable slice: message routing based on state, in-flight counter that drives DRAINING, and first-initialize-response detection. Initialize replay on child restart, tools/list caching and diffing, and the notifications/tools/list_changed emission path are deferred to 🎯T1.6a so this target stays focused and testable in isolation.
 - **Depends on**: 🎯T1.3, 🎯T1.4
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
+### 🎯T1.6.1 The dispatch layer intercepts the initialize handshake: initialize requests forward immediately even in STARTING, so the FSM transitions STARTING -> RUNNING naturally via INITIALIZE_OK instead of being force-stepped by main.c.
+- **Value**: 5
+- **Cost**: 3
+- **Acceptance**:
+  - wrapper/src/dispatch.c forwards initialize requests immediately regardless of FSM state (STARTING / RUNNING / SWAPPING)
+  - All other upstream messages continue to queue while not RUNNING
+  - wrapper/tests/dispatch_test.c has a test case that feeds an initialize request in STARTING and verifies it is forwarded, not queued
+  - wrapper/tests/dispatch_test.c's existing test_initialize_ok_emitted is rewritten to start from STARTING and exercise the real flow
+  - wrapper/tests/fake_mcp.c is a tiny MCP server that handles initialize / notifications/initialized / tools/list / tools/call with canned responses, built as a test helper like fake_echo
+  - wrapper/src/main.c no longer force-steps the FSM to RUNNING; startup is driven by the real initialize handshake
+  - wrapper/tests/e2e_wrapper_test.sh drives fake_mcp through the wrapper with a proper initialize handshake followed by a tools/list request, asserting both responses come back intact
+- **Context**: T1.7 landed with a known hack: main.c force-steps the FSM to RUNNING at startup because otherwise the initialize request would be queued while the FSM is STARTING, the child would never see it, no response would ever come, and the FSM would never reach RUNNING. This target fixes that deadlock at its root by making the dispatch layer aware that initialize requests are special: during STARTING, an initialize request is forwarded immediately instead of queued. The response then flows back, dispatch emits INITIALIZE_OK, and the FSM reaches RUNNING through the natural protocol. Also adds tests/fake_mcp.c (a minimal proper MCP server) and switches the e2e test to use it, so the smoke test exercises a real initialize handshake.
+- **Depends on**: 🎯T1.6, 🎯T1.7
 - **Status**: Achieved
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11

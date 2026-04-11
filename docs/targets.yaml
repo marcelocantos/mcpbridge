@@ -23,6 +23,7 @@ targets:
     - T1.5
     - T1.6
     - T1.7
+    - T1.6.1
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -138,6 +139,26 @@ targets:
     depends_on:
     - T1.3
     - T1.4
+    origin: manual
+    discovered: 2026-04-11
+    achieved: 2026-04-11
+  T1.6.1:
+    name: 'The dispatch layer intercepts the initialize handshake: initialize requests forward immediately even in STARTING, so the FSM transitions STARTING -> RUNNING naturally via INITIALIZE_OK instead of being force-stepped by main.c.'
+    status: achieved
+    value: 5.0
+    cost: 3.0
+    acceptance:
+    - wrapper/src/dispatch.c forwards initialize requests immediately regardless of FSM state (STARTING / RUNNING / SWAPPING)
+    - All other upstream messages continue to queue while not RUNNING
+    - wrapper/tests/dispatch_test.c has a test case that feeds an initialize request in STARTING and verifies it is forwarded, not queued
+    - wrapper/tests/dispatch_test.c's existing test_initialize_ok_emitted is rewritten to start from STARTING and exercise the real flow
+    - wrapper/tests/fake_mcp.c is a tiny MCP server that handles initialize / notifications/initialized / tools/list / tools/call with canned responses, built as a test helper like fake_echo
+    - wrapper/src/main.c no longer force-steps the FSM to RUNNING; startup is driven by the real initialize handshake
+    - wrapper/tests/e2e_wrapper_test.sh drives fake_mcp through the wrapper with a proper initialize handshake followed by a tools/list request, asserting both responses come back intact
+    context: 'T1.7 landed with a known hack: main.c force-steps the FSM to RUNNING at startup because otherwise the initialize request would be queued while the FSM is STARTING, the child would never see it, no response would ever come, and the FSM would never reach RUNNING. This target fixes that deadlock at its root by making the dispatch layer aware that initialize requests are special: during STARTING, an initialize request is forwarded immediately instead of queued. The response then flows back, dispatch emits INITIALIZE_OK, and the FSM reaches RUNNING through the natural protocol. Also adds tests/fake_mcp.c (a minimal proper MCP server) and switches the e2e test to use it, so the smoke test exercises a real initialize handshake.'
+    depends_on:
+    - T1.6
+    - T1.7
     origin: manual
     discovered: 2026-04-11
     achieved: 2026-04-11

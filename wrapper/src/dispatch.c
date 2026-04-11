@@ -117,12 +117,34 @@ int dispatch_initialized(const struct dispatch *d) {
 
 /* ---------- Upstream (agent -> wrapper -> child) ---------- */
 
+/* The initialize handshake is special: the client always sends
+ * `initialize` first, and the FSM is in STARTING precisely until
+ * that round-trip completes. If we queued it like any other request
+ * we would deadlock — the child would never receive it, never
+ * respond, and the FSM would never reach RUNNING. So initialize
+ * requests bypass the queue regardless of state. The companion
+ * `notifications/initialized` notification that the spec requires
+ * immediately after initialize gets the same treatment so both
+ * halves of the handshake complete before normal flow resumes. */
+static int is_handshake_message(const struct mcp_msg *m) {
+    if (m == NULL || m->method == NULL) {
+        return 0;
+    }
+    if (mcp_msg_is_request(m, "initialize")) {
+        return 1;
+    }
+    if (mcp_msg_is_notification(m, "notifications/initialized")) {
+        return 1;
+    }
+    return 0;
+}
+
 void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
     if (d == NULL || m == NULL || m->raw == NULL) {
         return;
     }
 
-    if (d->fsm->state == FSM_RUNNING) {
+    if (d->fsm->state == FSM_RUNNING || is_handshake_message(m)) {
         /* Forward immediately. Count requests (messages that expect
          * a response) so we can track in-flight for drain. */
         if (m->kind == MCP_KIND_REQUEST) {
@@ -132,10 +154,11 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
         return;
     }
 
-    /* Not RUNNING: queue for later drain. Responses from upstream
-     * (rare but possible; e.g. if the child issued a sampling request
-     * that upstream is answering) are also queued — they will
-     * naturally flow after the queue drains. */
+    /* Not RUNNING and not part of the handshake: queue for later
+     * drain. Responses from upstream (rare but possible; e.g. if the
+     * child issued a sampling request that upstream is answering)
+     * are also queued — they will naturally flow after the queue
+     * drains. */
     log_debug("dispatch: queuing upstream message (state %s, method=%s)",
               fsm_state_name(d->fsm->state),
               m->method != NULL ? m->method : "(none)");

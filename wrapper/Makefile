@@ -49,7 +49,7 @@ MAIN_OBJS  = $(MAIN_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 # Test-only helpers built as standalone binaries used by integration
 # tests. These are NOT part of TEST_BINS — they are prerequisites of
 # the actual test binaries that invoke them.
-TEST_HELPERS = tests/fake_echo
+TEST_HELPERS = tests/fake_echo tests/fake_mcp
 
 BIN        = mcpbridge
 TEST_BINS  = tests/smoke_test tests/mcp_test tests/fsm_test \
@@ -87,6 +87,10 @@ tests/fsm_test: tests/fsm_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 # a prerequisite of transport_stdio_test because the test invokes it.
 tests/fake_echo: tests/fake_echo.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/fake_echo.o
+
+# fake_mcp needs cJSON (it parses and emits JSON-RPC).
+tests/fake_mcp: tests/fake_mcp.o $(CJSON_SRCS:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/fake_mcp.o $(CJSON_SRCS:.c=.o)
 
 tests/transport_stdio_test: tests/transport_stdio_test.o \
                             $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o) \

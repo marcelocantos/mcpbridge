@@ -381,16 +381,10 @@ int main(int argc, char **argv) {
     }
     ctx.dispatch = d;
 
-    /* Force RUNNING for this first end-to-end cut. Without a proper
-     * initialize-handshake intercept, queuing upstream while we wait
-     * for initialize_ok would deadlock: the agent sends initialize,
-     * it gets queued, the child never sees it, no response ever
-     * arrives, we never reach RUNNING. Forcing RUNNING lets the
-     * dispatch layer forward the initialize request on the first
-     * pass. This is a known gap filled by the initialize replay
-     * work in 🎯T1.6a. */
-    fsm_step(&fsm, FSM_EV_INITIALIZE_OK);
-    dispatch_on_state_change(d, fsm.state);
+    /* The FSM stays in STARTING until the first initialize response
+     * arrives. The dispatch layer recognises initialize requests and
+     * forwards them immediately even while STARTING, so the natural
+     * handshake drives the transition to RUNNING. */
 
     int rc = run_loop(&ctx);
 

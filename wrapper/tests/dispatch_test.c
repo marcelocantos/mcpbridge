@@ -168,7 +168,11 @@ static void test_queue_while_starting_drain_on_running(void) {
     dispatch_free(d);
 }
 
-static void test_initialize_ok_emitted(void) {
+static void test_initialize_handshake_intercept(void) {
+    /* The real protocol flow: FSM starts in STARTING, upstream sends
+     * initialize, dispatch forwards it immediately (bypassing the
+     * queue), child responds, dispatch emits INITIALIZE_OK, event
+     * loop steps FSM to RUNNING. */
     struct fsm f;
     fsm_init(&f); /* STARTING */
 
@@ -181,34 +185,18 @@ static void test_initialize_ok_emitted(void) {
     };
     struct dispatch *d = dispatch_new(&f, &sink);
 
-    /* Upstream sends initialize request, which increments in-flight
-     * when forwarded. But we're in STARTING, which queues — the
-     * real protocol says the initialize request should flow
-     * immediately. We'll model this test around the *response*
-     * path, which is what matters for emitting INITIALIZE_OK.
-     *
-     * In the real event loop the dispatch layer will forward the
-     * initialize request upfront (a special-case to be added in
-     * T1.6a). For now we fake it by manually bumping in_flight via
-     * a queued-then-drained flow.
-     *
-     * Simpler path for this test: transition FSM to a state where
-     * the upstream path forwards immediately (RUNNING would defeat
-     * the purpose), or just exercise the child response path
-     * directly. We do the latter. */
-
-    /* Pretend the initialize request was already sent: set fsm so
-     * we're RUNNING, forward a request, then process the response. */
-    fsm_step(&f, FSM_EV_INITIALIZE_OK);
+    /* Initialize request from upstream while in STARTING. */
     struct mcp_msg req = parse_or_die(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
         "\"params\":{\"protocolVersion\":\"2024-11-05\","
         "\"capabilities\":{},\"clientInfo\":{\"name\":\"x\",\"version\":\"y\"}}}");
     dispatch_on_upstream(d, &req);
+
+    CHECK(sink_state.child_len > 0, "initialize forwarded during STARTING");
     CHECK(dispatch_in_flight(d) == 1, "in_flight=1 after request");
     CHECK(!dispatch_initialized(d), "not yet initialized");
 
-    /* Child response. */
+    /* Child response arrives. */
     struct mcp_msg resp = parse_or_die(
         "{\"jsonrpc\":\"2.0\",\"id\":1,"
         "\"result\":{\"protocolVersion\":\"2024-11-05\","
@@ -223,7 +211,13 @@ static void test_initialize_ok_emitted(void) {
           "INITIALIZE_OK emitted");
     CHECK(sink_state.up_len > 0, "response forwarded upstream");
 
-    /* A second response does NOT re-emit INITIALIZE_OK. */
+    /* Event loop would now step the FSM to RUNNING and call
+     * dispatch_on_state_change, draining any queued messages. */
+    fsm_step(&f, FSM_EV_INITIALIZE_OK);
+    dispatch_on_state_change(d, f.state);
+
+    /* A subsequent non-handshake request goes through the normal
+     * RUNNING path. */
     struct mcp_msg req2 = parse_or_die(
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}");
     struct mcp_msg resp2 = parse_or_die(
@@ -236,6 +230,57 @@ static void test_initialize_ok_emitted(void) {
     mcp_msg_free(&resp);
     mcp_msg_free(&req2);
     mcp_msg_free(&resp2);
+    dispatch_free(d);
+}
+
+static void test_non_handshake_queued_in_starting(void) {
+    /* Non-handshake messages must still queue while STARTING. */
+    struct fsm f;
+    fsm_init(&f);
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    /* A random ping during STARTING should be queued, not forwarded. */
+    struct mcp_msg ping = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":99,\"method\":\"ping\"}");
+    dispatch_on_upstream(d, &ping);
+    CHECK(sink_state.child_len == 0, "ping queued during STARTING");
+
+    mcp_msg_free(&ping);
+    dispatch_free(d);
+}
+
+static void test_initialized_notification_passes_through(void) {
+    /* notifications/initialized is part of the handshake and must
+     * bypass the queue just like the initialize request. */
+    struct fsm f;
+    fsm_init(&f);
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    struct mcp_msg n = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+    dispatch_on_upstream(d, &n);
+    CHECK(sink_state.child_len > 0,
+          "initialized notification forwarded during STARTING");
+    /* Notifications have no id; in_flight must NOT be incremented. */
+    CHECK(dispatch_in_flight(d) == 0, "notifications do not count as in-flight");
+
+    mcp_msg_free(&n);
     dispatch_free(d);
 }
 
@@ -342,7 +387,9 @@ static void test_drain_emits_in_flight_zero(void) {
 int main(void) {
     test_round_trip_running();
     test_queue_while_starting_drain_on_running();
-    test_initialize_ok_emitted();
+    test_initialize_handshake_intercept();
+    test_non_handshake_queued_in_starting();
+    test_initialized_notification_passes_through();
     test_initialize_failed_emitted();
     test_drain_emits_in_flight_zero();
 
