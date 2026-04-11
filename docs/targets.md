@@ -20,23 +20,6 @@
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
-### 🎯T1.10 Wrapper handles the full reload cycle: daemon-client integrated into the event loop, RELOAD drives DRAINING -> SWAPPING -> child respawn -> cached-initialize replay -> RUNNING -> reload_ack to daemon. Session stays alive across the child cycle.
-- **Value**: 13
-- **Cost**: 8
-- **Acceptance**:
-  - Dispatch caches the upstream initialize request and the notifications/initialized notification on first sighting, and has a dispatch_replay_initialize() that sends them to the current child via the sink
-  - Dispatch tracks a replay_pending flag so the initialize response arriving from a replayed initialize is consumed by the wrapper (not forwarded upstream) and emits INITIALIZE_OK to transition the FSM
-  - main.c dials the daemon at startup using a platform-default socket path (env MCPBRIDGE_SOCKET overrides). Missing daemon is logged once and the wrapper runs in standalone mode with periodic reconnect attempts.
-  - main.c polls the daemon fd alongside stdin and the child, routes RELOAD to FSM_EV_RELOAD_REQUESTED, and remembers the reload seq so reload_ack can reference it
-  - On SWAPPING entry the wrapper calls transport_stop, transport_start on the same command, emits TRANSPORT_STARTED to move SWAPPING -> STARTING, then calls dispatch_replay_initialize to push the cached handshake at the new child
-  - When the new child's initialize response arrives, dispatch consumes it (no upstream forward) and emits INITIALIZE_OK. main.c then sends reload_ack{status=ok, ack_seq=remembered seq} to the daemon
-  - Reconnect backoff matches the spec: 1s, 2s, 4s, capped at 5s, retries forever until the daemon comes up
-  - A new e2e test spawns the real daemon, wraps fake_mcp through it, sends SIGHUP to the daemon, verifies the session survives (initialize response replayed to the new child, no error propagated upstream), and cleans up
-- **Context**: This is the target that makes all the earlier plumbing pay off. Before this, T1.8 and T1.9 both work in isolation but nothing ties them together end-to-end: the wrapper doesn't dial the daemon, and even if it did, a reload notification would kill the session because no initialize replay exists. Splits cleanly into two pieces: T1.10a (dispatch caching + replay, pure and unit-testable) and T1.10b (main.c integration: dial, poll, reload handling, child respawn).
-- **Depends on**: 🎯T1.7, 🎯T1.9, 🎯T1.10.1
-- **Status**: Identified
-- **Discovered**: 2026-04-11
-
 ## Achieved
 
 ### 🎯T1.1 Repo is reshaped for the wrapper+daemon split: Go library deleted; wrapper/ (C) builds a stub mcpbridge binary; daemon/ (Go) builds a stub mcpbridge-daemon binary; top-level Makefile orchestrates both.
@@ -58,6 +41,24 @@
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11
 
+### 🎯T1.10 Wrapper handles the full reload cycle: daemon-client integrated into the event loop, RELOAD drives DRAINING -> SWAPPING -> child respawn -> cached-initialize replay -> RUNNING -> reload_ack to daemon. Session stays alive across the child cycle.
+- **Value**: 13
+- **Cost**: 8
+- **Acceptance**:
+  - Dispatch caches the upstream initialize request and the notifications/initialized notification on first sighting, and has a dispatch_replay_initialize() that sends them to the current child via the sink
+  - Dispatch tracks a replay_pending flag so the initialize response arriving from a replayed initialize is consumed by the wrapper (not forwarded upstream) and emits INITIALIZE_OK to transition the FSM
+  - main.c dials the daemon at startup using a platform-default socket path (env MCPBRIDGE_SOCKET overrides). Missing daemon is logged once and the wrapper runs in standalone mode with periodic reconnect attempts.
+  - main.c polls the daemon fd alongside stdin and the child, routes RELOAD to FSM_EV_RELOAD_REQUESTED, and remembers the reload seq so reload_ack can reference it
+  - On SWAPPING entry the wrapper calls transport_stop, transport_start on the same command, emits TRANSPORT_STARTED to move SWAPPING -> STARTING, then calls dispatch_replay_initialize to push the cached handshake at the new child
+  - When the new child's initialize response arrives, dispatch consumes it (no upstream forward) and emits INITIALIZE_OK. main.c then sends reload_ack{status=ok, ack_seq=remembered seq} to the daemon
+  - Reconnect backoff matches the spec: 1s, 2s, 4s, capped at 5s, retries forever until the daemon comes up
+  - A new e2e test spawns the real daemon, wraps fake_mcp through it, sends SIGHUP to the daemon, verifies the session survives (initialize response replayed to the new child, no error propagated upstream), and cleans up
+- **Context**: This is the target that makes all the earlier plumbing pay off. Before this, T1.8 and T1.9 both work in isolation but nothing ties them together end-to-end: the wrapper doesn't dial the daemon, and even if it did, a reload notification would kill the session because no initialize replay exists. Splits cleanly into two pieces: T1.10a (dispatch caching + replay, pure and unit-testable) and T1.10b (main.c integration: dial, poll, reload handling, child respawn).
+- **Depends on**: 🎯T1.7, 🎯T1.9, 🎯T1.10.1, 🎯T1.10.2
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
 ### 🎯T1.10.1 Dispatch layer caches the upstream initialize handshake and exposes a replay entry point, so the event loop can transparently re-initialise a freshly spawned child without telling the upstream agent anything changed.
 - **Value**: 5
 - **Cost**: 3
@@ -70,6 +71,24 @@
   - All existing dispatch tests still pass
 - **Context**: First half of T1.10. Pure change to dispatch.{h,c} + dispatch_test.c — no I/O, no main.c, no daemon. Adds: init-cache state, dispatch_replay_initialize entry point, replay_pending flag that consumes exactly one subsequent child response. Second half (main.c integration, transport cycling, reload ack) lands in T1.10.2 once this is green.
 - **Depends on**: 🎯T1.6.1
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
+### 🎯T1.10.2 main.c integrates the daemon client into the event loop: dials at startup (with reconnect-backoff), polls the daemon fd, routes RELOAD through FSM DRAINING->SWAPPING, cycles the transport, triggers the cached-initialize replay, and sends reload_ack on completion.
+- **Value**: 13
+- **Cost**: 8
+- **Acceptance**:
+  - wrapper/src/main.c has a resolve_daemon_socket_path() that honours $MCPBRIDGE_SOCKET and falls back to the platform default matching docs/wire-protocol.md
+  - main.c dials the daemon at startup; connection failure is logged once and the wrapper continues in standalone mode (no crash)
+  - Daemon fd is polled alongside stdin and the transport read fd; events are routed via daemon_client_try_read
+  - RELOAD event is stored (ack_seq + name) and FSM_EV_RELOAD_REQUESTED is emitted, moving FSM RUNNING -> DRAINING
+  - On entry to SWAPPING, main.c calls transport_stop + transport_start and emits TRANSPORT_STARTED then calls dispatch_replay_initialize
+  - When the replay's INITIALIZE_OK bubbles back through sink_emit_event and the FSM reaches RUNNING, main.c sends reload_ack{status='ok', ack_seq=<stored>} to the daemon
+  - Reconnect backoff: poll timeout is set to the remaining backoff interval when the daemon is disconnected; dial is retried on timeout with the sequence 1s -> 2s -> 4s -> 5s (capped), forever
+  - wrapper/tests/e2e_reload_test.sh spawns the real daemon, wraps fake_mcp through the built wrapper, does initialize/initialized/tools/list, sends SIGHUP to the daemon, follows with another tools/list, and verifies BOTH tools/list responses come back to the agent side unmodified
+- **Context**: Second half of T1.10. Depends on T1.10.1 (dispatch replay). Adds socket path resolution, reconnect-backoff timer, daemon event routing, SWAPPING-driven transport cycling, and the reload-ack path. Culminates in a new e2e test that exercises the full wrapper+daemon+reload loop against fake_mcp.
+- **Depends on**: 🎯T1.10.1, 🎯T1.9
 - **Status**: Achieved
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11
@@ -231,6 +250,4 @@
 ```mermaid
 graph TD
     T1["A generic C wrapper transpare…"]
-    T1_10["Wrapper handles the full relo…"]
-    T1 -.->|needs| T1_10
 ```

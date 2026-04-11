@@ -51,7 +51,7 @@ targets:
     achieved: 2026-04-11
   T1.10:
     name: 'Wrapper handles the full reload cycle: daemon-client integrated into the event loop, RELOAD drives DRAINING -> SWAPPING -> child respawn -> cached-initialize replay -> RUNNING -> reload_ack to daemon. Session stays alive across the child cycle.'
-    status: identified
+    status: achieved
     value: 13.0
     cost: 8.0
     acceptance:
@@ -68,8 +68,10 @@ targets:
     - T1.7
     - T1.9
     - T1.10.1
+    - T1.10.2
     origin: manual
     discovered: 2026-04-11
+    achieved: 2026-04-11
   T1.10.1:
     name: Dispatch layer caches the upstream initialize handshake and exposes a replay entry point, so the event loop can transparently re-initialise a freshly spawned child without telling the upstream agent anything changed.
     status: achieved
@@ -85,6 +87,27 @@ targets:
     context: 'First half of T1.10. Pure change to dispatch.{h,c} + dispatch_test.c — no I/O, no main.c, no daemon. Adds: init-cache state, dispatch_replay_initialize entry point, replay_pending flag that consumes exactly one subsequent child response. Second half (main.c integration, transport cycling, reload ack) lands in T1.10.2 once this is green.'
     depends_on:
     - T1.6.1
+    origin: manual
+    discovered: 2026-04-11
+    achieved: 2026-04-11
+  T1.10.2:
+    name: 'main.c integrates the daemon client into the event loop: dials at startup (with reconnect-backoff), polls the daemon fd, routes RELOAD through FSM DRAINING->SWAPPING, cycles the transport, triggers the cached-initialize replay, and sends reload_ack on completion.'
+    status: achieved
+    value: 13.0
+    cost: 8.0
+    acceptance:
+    - wrapper/src/main.c has a resolve_daemon_socket_path() that honours $MCPBRIDGE_SOCKET and falls back to the platform default matching docs/wire-protocol.md
+    - main.c dials the daemon at startup; connection failure is logged once and the wrapper continues in standalone mode (no crash)
+    - Daemon fd is polled alongside stdin and the transport read fd; events are routed via daemon_client_try_read
+    - RELOAD event is stored (ack_seq + name) and FSM_EV_RELOAD_REQUESTED is emitted, moving FSM RUNNING -> DRAINING
+    - On entry to SWAPPING, main.c calls transport_stop + transport_start and emits TRANSPORT_STARTED then calls dispatch_replay_initialize
+    - When the replay's INITIALIZE_OK bubbles back through sink_emit_event and the FSM reaches RUNNING, main.c sends reload_ack{status='ok', ack_seq=<stored>} to the daemon
+    - 'Reconnect backoff: poll timeout is set to the remaining backoff interval when the daemon is disconnected; dial is retried on timeout with the sequence 1s -> 2s -> 4s -> 5s (capped), forever'
+    - wrapper/tests/e2e_reload_test.sh spawns the real daemon, wraps fake_mcp through the built wrapper, does initialize/initialized/tools/list, sends SIGHUP to the daemon, follows with another tools/list, and verifies BOTH tools/list responses come back to the agent side unmodified
+    context: Second half of T1.10. Depends on T1.10.1 (dispatch replay). Adds socket path resolution, reconnect-backoff timer, daemon event routing, SWAPPING-driven transport cycling, and the reload-ack path. Culminates in a new e2e test that exercises the full wrapper+daemon+reload loop against fake_mcp.
+    depends_on:
+    - T1.10.1
+    - T1.9
     origin: manual
     discovered: 2026-04-11
     achieved: 2026-04-11

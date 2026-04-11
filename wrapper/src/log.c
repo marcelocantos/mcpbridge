@@ -67,4 +67,9 @@ void log_msg(enum log_level lvl, const char *fmt, ...) {
 
     line[total] = '\n';
     fwrite(line, 1, total + 1, stderr);
+    /* Flush after every message: when stderr is redirected to a
+     * file it would otherwise be fully buffered, which makes
+     * diagnosing a hang impossible because the tail of the log
+     * never reaches disk before the process is killed. */
+    fflush(stderr);
 }

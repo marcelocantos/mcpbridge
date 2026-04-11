@@ -291,6 +291,17 @@ void dispatch_on_state_change(struct dispatch *d, enum fsm_state new_state) {
     }
     if (new_state == FSM_RUNNING) {
         drain_queue(d);
+        return;
+    }
+    if (new_state == FSM_DRAINING && d->in_flight == 0) {
+        /* Entering DRAINING with nothing already in flight: there is
+         * literally nothing to drain, so post IN_FLIGHT_ZERO
+         * immediately. Without this the wrapper sits in DRAINING
+         * forever because IN_FLIGHT_ZERO is otherwise only emitted
+         * by dispatch_on_child when the last response decrements
+         * in_flight to zero. */
+        d->sink.emit_event(d->sink.ctx, FSM_EV_IN_FLIGHT_ZERO);
+        return;
     }
 }
 

@@ -10,6 +10,7 @@
 #include "cJSON.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
@@ -159,6 +160,23 @@ struct daemon_client *daemon_client_new(const char *sock_path) {
     return dc;
 }
 
+/* Toggle the O_NONBLOCK flag on the socket. Used to switch between
+ * the blocking handshake (which uses poll explicitly with a timeout)
+ * and the non-blocking operational phase (which reads inside the
+ * event loop and must not wedge). */
+static int set_nonblock(int fd, int nb) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) {
+        return -1;
+    }
+    if (nb) {
+        flags |= O_NONBLOCK;
+    } else {
+        flags &= ~O_NONBLOCK;
+    }
+    return fcntl(fd, F_SETFL, flags);
+}
+
 void daemon_client_free(struct daemon_client *dc) {
     if (dc == NULL) {
         return;
@@ -253,6 +271,15 @@ int daemon_client_do_handshake(struct daemon_client *dc,
         return -1;
     }
     cJSON_Delete(register_ok);
+
+    /* Handshake complete — switch the socket to non-blocking so the
+     * event loop's try_read never wedges the whole wrapper on a
+     * partial read. */
+    if (set_nonblock(dc->fd, 1) != 0) {
+        log_warn("daemon_client: set_nonblock failed: %s", strerror(errno));
+        /* Not fatal for correctness today, but future reads may
+         * block. Leave the connection alive. */
+    }
     return 0;
 }
 

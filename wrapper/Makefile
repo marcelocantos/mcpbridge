@@ -120,6 +120,8 @@ test: $(TEST_BINS) $(BIN) $(TEST_HELPERS)
 	done
 	@echo "==> tests/e2e_wrapper_test.sh"
 	@./tests/e2e_wrapper_test.sh
+	@echo "==> tests/e2e_reload_test.sh"
+	@./tests/e2e_reload_test.sh
 
 clean:
 	rm -f $(BIN) $(MAIN_OBJS) $(TEST_BINS) $(TEST_HELPERS) \
