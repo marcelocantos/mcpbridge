@@ -50,6 +50,22 @@ type Registration struct {
 // = false, which matches the pre-T1.11 behaviour.
 type ConfigLookup func(name string) (found bool, polling bool)
 
+// RegistrationHandler is called by the server whenever a wrapper
+// successfully registers or cleanly disappears. The watcher uses
+// this to start/stop fsnotify-tracking the wrapper's child binary.
+// A nil RegistrationHandler is valid (the server simply does not
+// notify anyone on state changes).
+type RegistrationHandler interface {
+	// OnRegister is called after the server has accepted a
+	// register envelope and sent register_ok. childBinary is the
+	// installed path the wrapper reported.
+	OnRegister(name, childBinary string)
+	// OnDeregister is called when a wrapper explicitly sends
+	// deregister OR when its connection closes (clean or
+	// otherwise). Called exactly once per registration.
+	OnDeregister(name string)
+}
+
 // Server listens on a Unix domain socket and accepts wrapper
 // connections. It is safe for concurrent use: all public methods
 // take the internal mutex.
@@ -57,6 +73,7 @@ type Server struct {
 	sockPath string
 	ln       net.Listener
 	lookup   ConfigLookup
+	regH     RegistrationHandler
 
 	mu     sync.Mutex
 	conns  map[uint64]*conn // keyed by internal connection id
@@ -66,7 +83,9 @@ type Server struct {
 // NewServer creates a server bound to the given socket path. The
 // parent directory is created with mode 0700 and any stale socket at
 // that path is unlinked before binding. `lookup` may be nil, in
-// which case every register_ok reports config_found=false.
+// which case every register_ok reports config_found=false. `regH`
+// may also be nil, in which case registration/deregistration
+// notifications are silently dropped.
 func NewServer(sockPath string, lookup ConfigLookup) (*Server, error) {
 	if _, err := EnsureSocketDir(sockPath); err != nil {
 		return nil, err
@@ -94,6 +113,16 @@ func NewServer(sockPath string, lookup ConfigLookup) (*Server, error) {
 
 // SocketPath returns the filesystem path the server is listening on.
 func (s *Server) SocketPath() string { return s.sockPath }
+
+// SetRegistrationHandler attaches a handler that receives
+// OnRegister / OnDeregister callbacks. Replaces any previous
+// handler. Safe to call before or after Run starts — registrations
+// that happened before this call are NOT replayed.
+func (s *Server) SetRegistrationHandler(h RegistrationHandler) {
+	s.mu.Lock()
+	s.regH = h
+	s.mu.Unlock()
+}
 
 // Run accepts connections until ctx is cancelled or the listener is
 // closed. It never returns an error from a clean shutdown; all errors
@@ -339,6 +368,16 @@ func (c *conn) serve() {
 		slog.Warn("conn: register_ok send failed", "id", c.id, "err", err)
 		return
 	}
+
+	// Notify the registration handler (typically the fsnotify
+	// watcher). Take the lock defensively — handlers may run
+	// arbitrary code.
+	c.server.mu.Lock()
+	regH := c.server.regH
+	c.server.mu.Unlock()
+	if regH != nil {
+		regH.OnRegister(c.reg.Name, c.reg.ChildBinary)
+	}
 	slog.Info("conn: registered",
 		"id", c.id,
 		"name", c.reg.Name,
@@ -426,6 +465,12 @@ func (c *conn) close() {
 func (c *conn) cleanup() {
 	c.server.mu.Lock()
 	delete(c.server.conns, c.id)
+	regH := c.server.regH
 	c.server.mu.Unlock()
 	_ = c.raw.Close()
+	// Fire OnDeregister exactly once per successful register. If
+	// the connection never reached the registered state, skip.
+	if regH != nil && c.reg != nil {
+		regH.OnDeregister(c.reg.Name)
+	}
 }

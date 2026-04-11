@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12, 🎯T1.13, 🎯T1.14
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12, 🎯T1.13, 🎯T1.14, 🎯T1.15
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -84,6 +84,23 @@
   - daemon main.go constructs and runs the scheduler in a goroutine after the socket server starts, and stops cleanly on SIGINT/SIGTERM
 - **Context**: Glue layer that makes T1.11 (configs) + T1.12 (brew) + T1.13 (github) actually do something. One goroutine per config, ticks on cfg.CheckInterval, uses interface seams so tests can inject fake sources and fake broadcasters. Adds a targeted ReloadName method to socket.Server so the scheduler only reloads the wrappers for the upgraded config, not every connected wrapper.
 - **Depends on**: 🎯T1.11, 🎯T1.12, 🎯T1.13
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.15 The daemon watches each registered wrapper's child_binary path via fsnotify and broadcasts a targeted reload when the file changes out-of-band (e.g. a user-initiated brew upgrade).
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - daemon/internal/watcher/watcher.go defines a Watcher with Start(ctx), Track(name, path), Untrack(name), and a Broadcaster seam for the reload push
+  - Uses github.com/fsnotify/fsnotify (added to daemon/go.mod + go.sum) — no other new deps
+  - Watches the parent directory of each tracked path and matches events against exact basenames so unrelated files in the same dir are ignored
+  - Debounces rapid event bursts (e.g. create -> chmod -> rename) with a short coalescing window so one brew upgrade produces exactly one reload broadcast
+  - socket.Server grows a RegistrationHandler callback so the scheduler/watcher can react to register / deregister events; the existing tests keep working because the callback is optional (nil = ignored)
+  - watcher_test.go touches a real file in t.TempDir() and asserts ReloadName is called exactly once with reason='binary_changed' via a stub Broadcaster
+  - daemon main.go constructs the watcher, passes its OnRegister/OnDeregister callback into NewServer, and runs the watcher alongside the scheduler
+- **Context**: Complements the scheduler: the scheduler catches upgrades we drove ourselves, the watcher catches upgrades the user drove via their own tooling. Uses fsnotify to watch the parent directory of each registered binary (fsnotify doesn't reliably catch writes to a single file), filters events to tracked names, and calls ReloadName on match. First third-party dependency in the daemon.
+- **Depends on**: 🎯T1.14
 - **Status**: Achieved
 - **Discovered**: 2026-04-12
 - **Achieved**: 2026-04-12

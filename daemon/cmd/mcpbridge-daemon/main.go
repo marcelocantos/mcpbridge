@@ -28,6 +28,7 @@ import (
 	"github.com/marcelocantos/mcpbridge/daemon/internal/scheduler"
 	"github.com/marcelocantos/mcpbridge/daemon/internal/socket"
 	"github.com/marcelocantos/mcpbridge/daemon/internal/source"
+	"github.com/marcelocantos/mcpbridge/daemon/internal/watcher"
 )
 
 // Version is injected at build time via -ldflags "-X main.Version=...".
@@ -157,6 +158,19 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Watcher: fsnotify on each registered wrapper's child_binary.
+	// Detects out-of-band upgrades (user-driven brew upgrade etc.)
+	// and broadcasts a targeted reload. Registrations flow through
+	// the socket server's RegistrationHandler callback.
+	wch, err := watcher.New(srv)
+	if err != nil {
+		slog.Error("start watcher", "err", err)
+		os.Exit(1)
+	}
+	srv.SetRegistrationHandler(wch)
+	go wch.Run(ctx)
+	defer wch.Close()
 
 	// Scheduler: one goroutine per config, polls on interval, uses
 	// the brew and github source backends, and broadcasts targeted

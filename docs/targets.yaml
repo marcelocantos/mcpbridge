@@ -31,6 +31,7 @@ targets:
     - T1.12
     - T1.13
     - T1.14
+    - T1.15
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -188,6 +189,25 @@ targets:
     - T1.11
     - T1.12
     - T1.13
+    origin: manual
+    discovered: 2026-04-12
+    achieved: 2026-04-12
+  T1.15:
+    name: The daemon watches each registered wrapper's child_binary path via fsnotify and broadcasts a targeted reload when the file changes out-of-band (e.g. a user-initiated brew upgrade).
+    status: achieved
+    value: 5.0
+    cost: 5.0
+    acceptance:
+    - daemon/internal/watcher/watcher.go defines a Watcher with Start(ctx), Track(name, path), Untrack(name), and a Broadcaster seam for the reload push
+    - Uses github.com/fsnotify/fsnotify (added to daemon/go.mod + go.sum) — no other new deps
+    - Watches the parent directory of each tracked path and matches events against exact basenames so unrelated files in the same dir are ignored
+    - Debounces rapid event bursts (e.g. create -> chmod -> rename) with a short coalescing window so one brew upgrade produces exactly one reload broadcast
+    - socket.Server grows a RegistrationHandler callback so the scheduler/watcher can react to register / deregister events; the existing tests keep working because the callback is optional (nil = ignored)
+    - watcher_test.go touches a real file in t.TempDir() and asserts ReloadName is called exactly once with reason='binary_changed' via a stub Broadcaster
+    - daemon main.go constructs the watcher, passes its OnRegister/OnDeregister callback into NewServer, and runs the watcher alongside the scheduler
+    context: 'Complements the scheduler: the scheduler catches upgrades we drove ourselves, the watcher catches upgrades the user drove via their own tooling. Uses fsnotify to watch the parent directory of each registered binary (fsnotify doesn''t reliably catch writes to a single file), filters events to tracked names, and calls ReloadName on match. First third-party dependency in the daemon.'
+    depends_on:
+    - T1.14
     origin: manual
     discovered: 2026-04-12
     achieved: 2026-04-12
