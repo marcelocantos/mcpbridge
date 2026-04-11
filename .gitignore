@@ -7,6 +7,8 @@
 /wrapper/build/
 /wrapper/tests/smoke_test
 /wrapper/tests/*_test
+/wrapper/tests/fake_echo
+/wrapper/tests/fake_mcp
 
 # Go build artifacts (daemon)
 /daemon/mcpbridge-daemon
