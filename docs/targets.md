@@ -16,11 +16,29 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
 ## Achieved
+
+### 🎯T1.11 The daemon loads per-server JSON config files from ~/.config/mcpbridge and wires config lookups into the socket server so register_ok reports config_found=true when a matching name exists.
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - daemon/internal/config/config.go defines a Config struct matching the schema (schema int, name string, source discriminated union on type, upgrade enum off|notify|auto, check_interval Go duration string)
+  - Supports source types brew (formula) and github (repo, asset, binary_in_archive, checksum_asset). Unknown source types and schema versions are rejected with a descriptive error including the file path
+  - config.Load(dirs ...) walks each listed directory, reads *.json files, parses and validates each, returns a map[string]*Config keyed by name and a slice of per-file errors (so one bad file doesn't break discovery of the rest)
+  - If two files in the same or different directories define the same name, the earlier directory wins and a warning is logged
+  - daemon/internal/config/config_test.go covers: a valid brew config, a valid github config, rejection of a bad schema version, rejection of an unknown source type, rejection of malformed JSON, and discovery of multiple configs across two directories
+  - daemon main.go calls config.Load with the user's ~/.config/mcpbridge/ directory at startup and passes a lookup closure into the socket server
+  - socket.Server.NewServer grows an optional ConfigLookup parameter; register_ok's config_found is populated from the lookup
+  - Existing daemon tests updated to use a stub lookup so no regressions
+- **Context**: First piece of daemon config loading. The wire protocol already reserves config_found in register_ok, but until now the daemon always returned false because there was no loader. This target lands a small config package (parse, validate, discover), plus the integration with the socket server so wrappers get the truthful answer. Source backends (brew, github) and the polling scheduler come in later targets; this one only gets to "the daemon knows which servers have configs."
+- **Depends on**: 🎯T1.8
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
 
 ### 🎯T1.1 Repo is reshaped for the wrapper+daemon split: Go library deleted; wrapper/ (C) builds a stub mcpbridge binary; daemon/ (Go) builds a stub mcpbridge-daemon binary; top-level Makefile orchestrates both.
 - **Value**: 5

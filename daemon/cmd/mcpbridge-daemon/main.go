@@ -21,13 +21,40 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
+	"github.com/marcelocantos/mcpbridge/daemon/internal/config"
 	"github.com/marcelocantos/mcpbridge/daemon/internal/socket"
 )
 
 // Version is injected at build time via -ldflags "-X main.Version=...".
 var Version = "0.0.0-dev"
+
+// resolveConfigDirs returns the directories the daemon should scan
+// for per-server JSON configs, in precedence order. The $MCPBRIDGE_CONFIG_DIR
+// env var overrides everything (used by tests); otherwise the user
+// config directory + the system share dir are searched.
+func resolveConfigDirs() []string {
+	if override := os.Getenv("MCPBRIDGE_CONFIG_DIR"); override != "" {
+		return []string{override}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "/tmp"
+	}
+	userDir := filepath.Join(home, ".config", "mcpbridge")
+
+	// System share dir: traditional /usr/local/share on macOS and
+	// most Linux distros; Homebrew adds /opt/homebrew/share on
+	// Apple Silicon. Walk both unconditionally — missing dirs are
+	// skipped by config.Load.
+	return []string{
+		userDir,
+		"/opt/homebrew/share/mcpbridge",
+		"/usr/local/share/mcpbridge",
+	}
+}
 
 const usageText = `Usage: mcpbridge-daemon [OPTIONS]
 
@@ -95,7 +122,31 @@ func main() {
 		sockPath = p
 	}
 
-	srv, err := socket.NewServer(sockPath)
+	// Load per-server config files. ~/.config/mcpbridge/ takes
+	// precedence over $prefix/share/mcpbridge/; both are discovered
+	// silently if missing.
+	configDirs := resolveConfigDirs()
+	cfgLoad := config.Load(configDirs...)
+	for _, err := range cfgLoad.Errors {
+		slog.Warn("config: parse error", "err", err)
+	}
+	slog.Info("config: loaded",
+		"count", len(cfgLoad.Configs),
+		"dirs", configDirs)
+
+	lookup := func(name string) (bool, bool) {
+		cfg, ok := cfgLoad.Configs[name]
+		if !ok {
+			return false, false
+		}
+		// Polling is enabled when the config exists AND its upgrade
+		// mode isn't "off". The source backends (T1.12) will
+		// actually consult this to decide whether to schedule a
+		// poll; for now it's just reported back to the wrapper.
+		return true, cfg.Upgrade != config.UpgradeOff
+	}
+
+	srv, err := socket.NewServer(sockPath, lookup)
 	if err != nil {
 		slog.Error("start server", "err", err)
 		os.Exit(1)

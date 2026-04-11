@@ -39,12 +39,24 @@ type Registration struct {
 	conn        *conn
 }
 
+// ConfigLookup is the callback the server uses to answer
+// register_ok's config_found / polling fields. Given a wrapper's
+// registered name, the callback returns whether a matching config
+// exists (and thus whether the daemon will actively poll an upgrade
+// source for that wrapper's server). Daemon main.go supplies a
+// closure backed by internal/config; tests supply stubs.
+//
+// A nil ConfigLookup is valid: every registration gets config_found
+// = false, which matches the pre-T1.11 behaviour.
+type ConfigLookup func(name string) (found bool, polling bool)
+
 // Server listens on a Unix domain socket and accepts wrapper
 // connections. It is safe for concurrent use: all public methods
 // take the internal mutex.
 type Server struct {
 	sockPath string
 	ln       net.Listener
+	lookup   ConfigLookup
 
 	mu     sync.Mutex
 	conns  map[uint64]*conn // keyed by internal connection id
@@ -53,8 +65,9 @@ type Server struct {
 
 // NewServer creates a server bound to the given socket path. The
 // parent directory is created with mode 0700 and any stale socket at
-// that path is unlinked before binding.
-func NewServer(sockPath string) (*Server, error) {
+// that path is unlinked before binding. `lookup` may be nil, in
+// which case every register_ok reports config_found=false.
+func NewServer(sockPath string, lookup ConfigLookup) (*Server, error) {
 	if _, err := EnsureSocketDir(sockPath); err != nil {
 		return nil, err
 	}
@@ -74,6 +87,7 @@ func NewServer(sockPath string) (*Server, error) {
 	return &Server{
 		sockPath: sockPath,
 		ln:       ln,
+		lookup:   lookup,
 		conns:    make(map[uint64]*conn),
 	}, nil
 }
@@ -265,14 +279,16 @@ func (c *conn) serve() {
 		ChildBinary: reg.ChildBinary,
 		conn:        c,
 	}
-	// v1 has no config loader yet, so config_found is always false
-	// and polling is always off. Later targets populate these.
+	var configFound, polling bool
+	if c.server.lookup != nil {
+		configFound, polling = c.server.lookup(reg.Name)
+	}
 	if err := c.send(&Envelope{
 		Type:        TypeRegisterOK,
 		Seq:         c.nextSeq(),
 		AckSeq:      reg.Seq,
-		ConfigFound: false,
-		Polling:     false,
+		ConfigFound: configFound,
+		Polling:     polling,
 	}); err != nil {
 		slog.Warn("conn: register_ok send failed", "id", c.id, "err", err)
 		return
