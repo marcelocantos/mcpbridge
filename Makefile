@@ -21,7 +21,9 @@ daemon:
 
 test: wrapper-test daemon-test
 
-wrapper-test:
+# wrapper-test depends on the daemon binary: the integration test
+# tests/daemon_client_test fork/execs the real mcpbridge-daemon.
+wrapper-test: daemon
 	$(MAKE) -C wrapper test VERSION=$(VERSION)
 
 daemon-test:

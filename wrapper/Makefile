@@ -39,7 +39,8 @@ CORE_SRCS  = \
     src/mcp.c \
     src/fsm.c \
     src/transport_stdio.c \
-    src/dispatch.c
+    src/dispatch.c \
+    src/daemon_client.c
 
 MAIN_SRCS  = src/main.c $(CORE_SRCS) $(WATCH_SRC)
 CJSON_SRCS = vendor/cjson/cJSON.c
@@ -53,7 +54,8 @@ TEST_HELPERS = tests/fake_echo tests/fake_mcp
 
 BIN        = mcpbridge
 TEST_BINS  = tests/smoke_test tests/mcp_test tests/fsm_test \
-             tests/transport_stdio_test tests/dispatch_test
+             tests/transport_stdio_test tests/dispatch_test \
+             tests/daemon_client_test
 
 .PHONY: all test clean install
 
@@ -100,6 +102,15 @@ tests/transport_stdio_test: tests/transport_stdio_test.o \
 
 tests/dispatch_test: tests/dispatch_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/dispatch_test.o \
+	    $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+
+# daemon_client_test forks the real daemon binary, so it depends on
+# the daemon having been built at the top level. The Makefile here
+# has no way to build the Go daemon itself; the top-level Makefile's
+# `test` target satisfies this by building `daemon` before running
+# the wrapper tests.
+tests/daemon_client_test: tests/daemon_client_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/daemon_client_test.o \
 	    $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
 test: $(TEST_BINS) $(BIN) $(TEST_HELPERS)

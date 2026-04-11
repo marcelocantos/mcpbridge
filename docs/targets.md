@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -174,6 +174,21 @@
   - `go test ./...` in daemon/ passes all new tests
 - **Context**: First real daemon functionality. Scope: socket path resolution per platform, wire-protocol message types matching docs/wire-protocol.md, a listener + connection handler that speaks the protocol, and a registry tracking live wrappers. SIGHUP broadcasts a reload to all connected wrappers with reason=manual — both a useful "check now" knob and the easiest way to test the reload path without source backends or a scheduler. Source backends and the polling scheduler come in later targets.
 - **Depends on**: 🎯T1.1, 🎯T1.2
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
+### 🎯T1.9 The wrapper has a daemon client module (daemon_client.c/h) that dials the daemon's UDS, performs the hello/register handshake, and can read and write protocol envelopes. Integration test uses the real daemon binary.
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - wrapper/src/daemon_client.{h,c} exposes daemon_client_new, daemon_client_do_handshake, daemon_client_send_deregister, daemon_client_send_reload_ack, daemon_client_try_read, daemon_client_fd, daemon_client_free
+  - The read path accumulates bytes via mcp_reader (or an equivalent line reader) and parses each complete line as a JSON envelope with cJSON
+  - Socket path can be specified explicitly (or picked up from $MCPBRIDGE_SOCKET); no platform-default resolution yet — that can live in main.c later
+  - wrapper/tests/daemon_client_test.c fork/execs the real mcpbridge-daemon binary into a private /tmp socket, connects as a client, does hello + register, asserts register_ok is received, sends a deregister, and tears the daemon down cleanly
+  - make test passes daemon_client_test
+- **Context**: Second half of the wire protocol: the wrapper side of the socket. Standalone module for now — main.c integration and the full reload-cycles-child flow come in 🎯T1.10. This target isolates the connect/handshake/envelope plumbing so it can be tested in isolation against a real spawned daemon binary, which also exercises the daemon side (T1.8) on the same integration path.
+- **Depends on**: 🎯T1.2, 🎯T1.8
 - **Status**: Achieved
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11

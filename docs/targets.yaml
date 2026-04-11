@@ -25,6 +25,7 @@ targets:
     - T1.7
     - T1.6.1
     - T1.8
+    - T1.9
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -201,6 +202,24 @@ targets:
     depends_on:
     - T1.1
     - T1.2
+    origin: manual
+    discovered: 2026-04-11
+    achieved: 2026-04-11
+  T1.9:
+    name: The wrapper has a daemon client module (daemon_client.c/h) that dials the daemon's UDS, performs the hello/register handshake, and can read and write protocol envelopes. Integration test uses the real daemon binary.
+    status: achieved
+    value: 5.0
+    cost: 5.0
+    acceptance:
+    - wrapper/src/daemon_client.{h,c} exposes daemon_client_new, daemon_client_do_handshake, daemon_client_send_deregister, daemon_client_send_reload_ack, daemon_client_try_read, daemon_client_fd, daemon_client_free
+    - The read path accumulates bytes via mcp_reader (or an equivalent line reader) and parses each complete line as a JSON envelope with cJSON
+    - Socket path can be specified explicitly (or picked up from $MCPBRIDGE_SOCKET); no platform-default resolution yet — that can live in main.c later
+    - wrapper/tests/daemon_client_test.c fork/execs the real mcpbridge-daemon binary into a private /tmp socket, connects as a client, does hello + register, asserts register_ok is received, sends a deregister, and tears the daemon down cleanly
+    - make test passes daemon_client_test
+    context: 'Second half of the wire protocol: the wrapper side of the socket. Standalone module for now — main.c integration and the full reload-cycles-child flow come in 🎯T1.10. This target isolates the connect/handshake/envelope plumbing so it can be tested in isolation against a real spawned daemon binary, which also exercises the daemon side (T1.8) on the same integration path.'
+    depends_on:
+    - T1.2
+    - T1.8
     origin: manual
     discovered: 2026-04-11
     achieved: 2026-04-11
