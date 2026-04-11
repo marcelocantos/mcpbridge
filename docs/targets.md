@@ -20,21 +20,6 @@
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
-### 🎯T1.3 The wrapper has a complete MCP framing + parsing module (mcp.c / mcp.h) with unit tests covering initialize, tools/list, tools/call, notifications, id tracking, and framing edge cases.
-- **Value**: 5
-- **Cost**: 5
-- **Acceptance**:
-  - wrapper/src/mcp.h declares types and functions for: parsing one newline-delimited JSON-RPC message from a byte buffer, identifying message kind (request/response/notification), extracting method name + id, pulling out the initialize-response payload for caching, and emitting a notifications/tools/list_changed message
-  - wrapper/src/mcp.c implements the above using vendored cJSON with strict validation (no trust of upstream)
-  - JSON-RPC ids handled as either number or string (stored as a tagged union or string-normalised form)
-  - Streaming line reader caps individual messages at 4 MB; longer messages are rejected cleanly with a descriptive error
-  - wrapper/tests/mcp_test.c unit-tests every function with golden inputs: well-formed initialize, well-formed tools/list, well-formed tools/call, a notification with no id, a malformed message, a message at the size cap, an id that is a string, and an id that is a float (rejected cleanly)
-  - make test passes the mcp_test binary
-- **Context**: The wrapper needs to parse MCP messages to do its job: it must recognise initialize (for caching + replay), tools/list (for diffing), tools/call (for in-flight id tracking), notifications (pass-through vs emit), and it must produce well-formed MCP messages of its own (replay initialize, emit tools/list_changed). This module is pure: no I/O, no state machine dependencies, just bytes in -> structured view out, and structured form -> bytes out. First real C module after the skeleton; unblocks the state machine (T1.4).
-- **Depends on**: 🎯T1.1
-- **Status**: Identified
-- **Discovered**: 2026-04-11
-
 ## Achieved
 
 ### 🎯T1.1 Repo is reshaped for the wrapper+daemon split: Go library deleted; wrapper/ (C) builds a stub mcpbridge binary; daemon/ (Go) builds a stub mcpbridge-daemon binary; top-level Makefile orchestrates both.
@@ -71,11 +56,25 @@
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11
 
+### 🎯T1.3 The wrapper has a complete MCP framing + parsing module (mcp.c / mcp.h) with unit tests covering initialize, tools/list, tools/call, notifications, id tracking, and framing edge cases.
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - wrapper/src/mcp.h declares types and functions for: parsing one newline-delimited JSON-RPC message from a byte buffer, identifying message kind (request/response/notification), extracting method name + id, pulling out the initialize-response payload for caching, and emitting a notifications/tools/list_changed message
+  - wrapper/src/mcp.c implements the above using vendored cJSON with strict validation (no trust of upstream)
+  - JSON-RPC ids handled as either number or string (stored as a tagged union or string-normalised form)
+  - Streaming line reader caps individual messages at 4 MB; longer messages are rejected cleanly with a descriptive error
+  - wrapper/tests/mcp_test.c unit-tests every function with golden inputs: well-formed initialize, well-formed tools/list, well-formed tools/call, a notification with no id, a malformed message, a message at the size cap, an id that is a string, and an id that is a float (rejected cleanly)
+  - make test passes the mcp_test binary
+- **Context**: The wrapper needs to parse MCP messages to do its job: it must recognise initialize (for caching + replay), tools/list (for diffing), tools/call (for in-flight id tracking), notifications (pass-through vs emit), and it must produce well-formed MCP messages of its own (replay initialize, emit tools/list_changed). This module is pure: no I/O, no state machine dependencies, just bytes in -> structured view out, and structured form -> bytes out. First real C module after the skeleton; unblocks the state machine (T1.4).
+- **Depends on**: 🎯T1.1
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
 ## Graph
 
 ```mermaid
 graph TD
     T1["A generic C wrapper transpare…"]
-    T1_3["The wrapper has a complete MC…"]
-    T1 -.->|needs| T1_3
 ```

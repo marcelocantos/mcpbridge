@@ -60,7 +60,7 @@ targets:
     achieved: 2026-04-11
   T1.3:
     name: The wrapper has a complete MCP framing + parsing module (mcp.c / mcp.h) with unit tests covering initialize, tools/list, tools/call, notifications, id tracking, and framing edge cases.
-    status: identified
+    status: achieved
     value: 5.0
     cost: 5.0
     acceptance:
@@ -75,3 +75,4 @@ targets:
     - T1.1
     origin: manual
     discovered: 2026-04-11
+    achieved: 2026-04-11

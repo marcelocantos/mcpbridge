@@ -35,7 +35,8 @@ endif
 # Shared sources (modules landing in later sub-targets get added here).
 CORE_SRCS  = \
     src/log.c \
-    src/util.c
+    src/util.c \
+    src/mcp.c
 
 MAIN_SRCS  = src/main.c $(CORE_SRCS) $(WATCH_SRC)
 CJSON_SRCS = vendor/cjson/cJSON.c
@@ -43,7 +44,7 @@ CJSON_SRCS = vendor/cjson/cJSON.c
 MAIN_OBJS  = $(MAIN_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
 BIN        = mcpbridge
-TEST_BINS  = tests/smoke_test
+TEST_BINS  = tests/smoke_test tests/mcp_test
 
 .PHONY: all test clean install
 
@@ -64,8 +65,11 @@ tests/%.o: tests/%.c
 
 # Test binaries link against the core sources directly so each test
 # module exercises real code with no mocking layer.
-tests/smoke_test: tests/smoke_test.o $(CORE_SRCS:.c=.o)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/smoke_test.o $(CORE_SRCS:.c=.o)
+tests/smoke_test: tests/smoke_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/smoke_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+
+tests/mcp_test: tests/mcp_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/mcp_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
 test: $(TEST_BINS)
 	@set -e; for t in $(TEST_BINS); do \
