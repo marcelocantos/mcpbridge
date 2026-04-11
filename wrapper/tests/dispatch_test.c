@@ -384,6 +384,174 @@ static void test_drain_emits_in_flight_zero(void) {
     dispatch_free(d);
 }
 
+static void test_initialize_cached_on_first_sighting(void) {
+    struct fsm f;
+    fsm_init(&f);
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    CHECK(!dispatch_has_cached_init(d), "nothing cached initially");
+
+    struct mcp_msg req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+        "\"params\":{\"protocolVersion\":\"2024-11-05\","
+        "\"capabilities\":{},\"clientInfo\":{\"name\":\"x\",\"version\":\"y\"}}}");
+    dispatch_on_upstream(d, &req);
+
+    CHECK(dispatch_has_cached_init(d),
+          "initialize cached after first upstream sighting");
+
+    /* notifications/initialized also gets cached. */
+    struct mcp_msg inited = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+    dispatch_on_upstream(d, &inited);
+
+    /* Still cached, and also able to replay now. */
+    CHECK(dispatch_has_cached_init(d), "still cached after initialized");
+
+    mcp_msg_free(&req);
+    mcp_msg_free(&inited);
+    dispatch_free(d);
+}
+
+static void test_replay_sends_cached_bytes_to_child(void) {
+    struct fsm f;
+    fsm_init(&f);
+    fsm_step(&f, FSM_EV_INITIALIZE_OK); /* RUNNING */
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    /* Drive the first handshake so the init request is cached. */
+    struct mcp_msg req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+        "\"params\":{\"protocolVersion\":\"2024-11-05\","
+        "\"capabilities\":{},\"clientInfo\":{\"name\":\"x\",\"version\":\"y\"}}}");
+    struct mcp_msg resp = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
+    struct mcp_msg inited = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+    dispatch_on_upstream(d, &req);
+    dispatch_on_child(d, &resp);
+    dispatch_on_upstream(d, &inited);
+
+    /* Clear the sink state so we only observe the replay. */
+    memset(&sink_state, 0, sizeof(sink_state));
+
+    int rc = dispatch_replay_initialize(d);
+    CHECK(rc == 1, "replay_initialize reported bytes sent");
+    CHECK(sink_state.child_len > 0, "replay wrote to child");
+    /* Should contain both the initialize request and the initialized
+     * notification. */
+    CHECK(strstr(sink_state.child_buf, "\"initialize\"") != NULL,
+          "replay payload includes initialize");
+    CHECK(strstr(sink_state.child_buf, "notifications/initialized") != NULL,
+          "replay payload includes initialized notification");
+    CHECK(dispatch_in_flight(d) == 1,
+          "in_flight incremented by replay (initialize request)");
+
+    mcp_msg_free(&req);
+    mcp_msg_free(&resp);
+    mcp_msg_free(&inited);
+    dispatch_free(d);
+}
+
+static void test_replay_response_consumed_not_forwarded(void) {
+    struct fsm f;
+    fsm_init(&f);
+    fsm_step(&f, FSM_EV_INITIALIZE_OK); /* RUNNING */
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    /* Prime the cache via the first real handshake. */
+    struct mcp_msg req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+    struct mcp_msg first_resp = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
+    dispatch_on_upstream(d, &req);
+    dispatch_on_child(d, &first_resp);
+
+    /* Reset recording so we only see replay-era activity. */
+    memset(&sink_state, 0, sizeof(sink_state));
+
+    /* Trigger the replay. */
+    dispatch_replay_initialize(d);
+    CHECK(dispatch_in_flight(d) == 1, "in_flight=1 after replay");
+
+    /* The new child responds to the replayed initialize. */
+    size_t upstream_bytes_before = sink_state.up_len;
+    struct mcp_msg replay_resp = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,"
+        "\"result\":{\"serverInfo\":{\"name\":\"x\",\"version\":\"2\"}}}");
+    dispatch_on_child(d, &replay_resp);
+
+    CHECK(sink_state.up_len == upstream_bytes_before,
+          "replay response NOT forwarded upstream");
+    CHECK(dispatch_in_flight(d) == 0, "in_flight decremented to 0");
+    CHECK(sink_state.event_count == 1, "one event emitted by replay consume");
+    CHECK(sink_state.events[0] == FSM_EV_INITIALIZE_OK,
+          "INITIALIZE_OK emitted");
+
+    /* After the replay completes, a subsequent real request/response
+     * still flows normally upstream. */
+    memset(&sink_state, 0, sizeof(sink_state));
+    struct mcp_msg ping = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}");
+    struct mcp_msg pong = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}");
+    dispatch_on_upstream(d, &ping);
+    dispatch_on_child(d, &pong);
+    CHECK(sink_state.up_len > 0, "normal response still flows after replay");
+
+    mcp_msg_free(&req);
+    mcp_msg_free(&first_resp);
+    mcp_msg_free(&replay_resp);
+    mcp_msg_free(&ping);
+    mcp_msg_free(&pong);
+    dispatch_free(d);
+}
+
+static void test_replay_noop_without_cache(void) {
+    struct fsm f;
+    fsm_init(&f);
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    int rc = dispatch_replay_initialize(d);
+    CHECK(rc == 0, "replay_initialize returns 0 with empty cache");
+    CHECK(sink_state.child_len == 0, "no bytes sent");
+    CHECK(sink_state.event_count == 0, "no events emitted");
+
+    dispatch_free(d);
+}
+
 int main(void) {
     test_round_trip_running();
     test_queue_while_starting_drain_on_running();
@@ -392,6 +560,10 @@ int main(void) {
     test_initialized_notification_passes_through();
     test_initialize_failed_emitted();
     test_drain_emits_in_flight_zero();
+    test_initialize_cached_on_first_sighting();
+    test_replay_sends_cached_bytes_to_child();
+    test_replay_response_consumed_not_forwarded();
+    test_replay_noop_without_cache();
 
     if (fail_count > 0) {
         fprintf(stderr, "%d dispatch_test assertion(s) failed\n", fail_count);

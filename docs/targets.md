@@ -16,7 +16,24 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10
+- **Status**: Identified
+- **Discovered**: 2026-04-11
+
+### 🎯T1.10 Wrapper handles the full reload cycle: daemon-client integrated into the event loop, RELOAD drives DRAINING -> SWAPPING -> child respawn -> cached-initialize replay -> RUNNING -> reload_ack to daemon. Session stays alive across the child cycle.
+- **Value**: 13
+- **Cost**: 8
+- **Acceptance**:
+  - Dispatch caches the upstream initialize request and the notifications/initialized notification on first sighting, and has a dispatch_replay_initialize() that sends them to the current child via the sink
+  - Dispatch tracks a replay_pending flag so the initialize response arriving from a replayed initialize is consumed by the wrapper (not forwarded upstream) and emits INITIALIZE_OK to transition the FSM
+  - main.c dials the daemon at startup using a platform-default socket path (env MCPBRIDGE_SOCKET overrides). Missing daemon is logged once and the wrapper runs in standalone mode with periodic reconnect attempts.
+  - main.c polls the daemon fd alongside stdin and the child, routes RELOAD to FSM_EV_RELOAD_REQUESTED, and remembers the reload seq so reload_ack can reference it
+  - On SWAPPING entry the wrapper calls transport_stop, transport_start on the same command, emits TRANSPORT_STARTED to move SWAPPING -> STARTING, then calls dispatch_replay_initialize to push the cached handshake at the new child
+  - When the new child's initialize response arrives, dispatch consumes it (no upstream forward) and emits INITIALIZE_OK. main.c then sends reload_ack{status=ok, ack_seq=remembered seq} to the daemon
+  - Reconnect backoff matches the spec: 1s, 2s, 4s, capped at 5s, retries forever until the daemon comes up
+  - A new e2e test spawns the real daemon, wraps fake_mcp through it, sends SIGHUP to the daemon, verifies the session survives (initialize response replayed to the new child, no error propagated upstream), and cleans up
+- **Context**: This is the target that makes all the earlier plumbing pay off. Before this, T1.8 and T1.9 both work in isolation but nothing ties them together end-to-end: the wrapper doesn't dial the daemon, and even if it did, a reload notification would kill the session because no initialize replay exists. Splits cleanly into two pieces: T1.10a (dispatch caching + replay, pure and unit-testable) and T1.10b (main.c integration: dial, poll, reload handling, child respawn).
+- **Depends on**: 🎯T1.7, 🎯T1.9, 🎯T1.10.1
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -37,6 +54,22 @@
   - .gitignore covers C and Go build artifacts
   - README.md explains the two-process model at a high level
 - **Context**: First sub-target of 🎯T1. After the strategy pivot, mcpbridge is split into two processes: a C stdio wrapper (per MCP server) and a Go daemon (one per user session, run under brew services). This target establishes the two-subdirectory layout and proves both build. Real behavior lands in later sub-targets.
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
+### 🎯T1.10.1 Dispatch layer caches the upstream initialize handshake and exposes a replay entry point, so the event loop can transparently re-initialise a freshly spawned child without telling the upstream agent anything changed.
+- **Value**: 5
+- **Cost**: 3
+- **Acceptance**:
+  - dispatch.c captures the raw bytes of the first upstream initialize request and the first upstream notifications/initialized, owned by the dispatch struct and freed in dispatch_free
+  - dispatch_replay_initialize(d) sends the cached initialize request to the child via the sink (+ the initialized notification if one was captured) and sets replay_pending
+  - When replay_pending is set, the next child response is consumed: not forwarded upstream, in_flight is decremented if it was tracking the replayed request, INITIALIZE_OK is emitted, and replay_pending is cleared
+  - dispatch_replay_initialize is a no-op (returns 0) if no initialize has been cached yet
+  - New dispatch_test cases cover: caching on first sighting, replay sends bytes to child, replay response consumed not forwarded, second replay works (cache survives) and emits INITIALIZE_OK again
+  - All existing dispatch tests still pass
+- **Context**: First half of T1.10. Pure change to dispatch.{h,c} + dispatch_test.c — no I/O, no main.c, no daemon. Adds: init-cache state, dispatch_replay_initialize entry point, replay_pending flag that consumes exactly one subsequent child response. Second half (main.c integration, transport cycling, reload ack) lands in T1.10.2 once this is green.
+- **Depends on**: 🎯T1.6.1
 - **Status**: Achieved
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11
@@ -198,4 +231,6 @@
 ```mermaid
 graph TD
     T1["A generic C wrapper transpare…"]
+    T1_10["Wrapper handles the full relo…"]
+    T1 -.->|needs| T1_10
 ```

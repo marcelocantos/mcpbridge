@@ -25,6 +25,16 @@ struct dispatch {
 
     int in_flight;
     int initialized;        /* 1 once we've seen an initialize response */
+    int replay_pending;     /* 1 while we're waiting for the response to
+                               a replayed initialize request — that
+                               response is consumed, not forwarded */
+
+    /* Cached handshake messages, owned. Captured on first sighting
+     * from upstream; replayed verbatim to a new child after a swap. */
+    char  *cached_init_req;
+    size_t cached_init_req_len;
+    char  *cached_initialized_notif;
+    size_t cached_initialized_notif_len;
 
     struct queued_msg *queue_head;
     struct queued_msg *queue_tail;
@@ -104,6 +114,8 @@ void dispatch_free(struct dispatch *d) {
         queued_msg_free(q);
         q = next;
     }
+    free(d->cached_init_req);
+    free(d->cached_initialized_notif);
     free(d);
 }
 
@@ -113,6 +125,21 @@ int dispatch_in_flight(const struct dispatch *d) {
 
 int dispatch_initialized(const struct dispatch *d) {
     return (d == NULL) ? 0 : d->initialized;
+}
+
+int dispatch_has_cached_init(const struct dispatch *d) {
+    return (d == NULL) ? 0 : (d->cached_init_req != NULL);
+}
+
+/* Store a copy of the given bytes in *dst / *dst_len, replacing any
+ * prior content. Used to cache the initialize request and the
+ * initialized notification on first sighting. */
+static void capture_raw(char **dst, size_t *dst_len,
+                        const void *bytes, size_t n) {
+    free(*dst);
+    *dst = xmalloc(n);
+    memcpy(*dst, bytes, n);
+    *dst_len = n;
 }
 
 /* ---------- Upstream (agent -> wrapper -> child) ---------- */
@@ -144,6 +171,21 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
         return;
     }
 
+    /* Cache the handshake messages on first sighting so we can
+     * replay them to a freshly spawned child after a reload. The
+     * first sighting wins — if the agent ever re-sends initialize
+     * (unusual but legal) we keep the earlier copy. */
+    if (d->cached_init_req == NULL && mcp_msg_is_request(m, "initialize")) {
+        capture_raw(&d->cached_init_req, &d->cached_init_req_len,
+                    m->raw, m->raw_len);
+    }
+    if (d->cached_initialized_notif == NULL &&
+        mcp_msg_is_notification(m, "notifications/initialized")) {
+        capture_raw(&d->cached_initialized_notif,
+                    &d->cached_initialized_notif_len,
+                    m->raw, m->raw_len);
+    }
+
     if (d->fsm->state == FSM_RUNNING || is_handshake_message(m)) {
         /* Forward immediately. Count requests (messages that expect
          * a response) so we can track in-flight for drain. */
@@ -169,6 +211,24 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
 
 void dispatch_on_child(struct dispatch *d, const struct mcp_msg *m) {
     if (d == NULL || m == NULL || m->raw == NULL) {
+        return;
+    }
+
+    /* Replay-response consumption. After a swap, the wrapper sends
+     * the cached initialize to the new child; the first response we
+     * see on this new connection is that replayed init's answer.
+     * The agent already has an initialize response from the previous
+     * child, so we DO NOT forward the new one — we just emit
+     * INITIALIZE_OK (or _FAILED) to advance the FSM. */
+    if (d->replay_pending && m->kind == MCP_KIND_RESPONSE) {
+        d->replay_pending = 0;
+        if (d->in_flight > 0) {
+            d->in_flight--;
+        }
+        enum fsm_event ev = m->is_error
+            ? FSM_EV_INITIALIZE_FAILED
+            : FSM_EV_INITIALIZE_OK;
+        d->sink.emit_event(d->sink.ctx, ev);
         return;
     }
 
@@ -232,4 +292,27 @@ void dispatch_on_state_change(struct dispatch *d, enum fsm_state new_state) {
     if (new_state == FSM_RUNNING) {
         drain_queue(d);
     }
+}
+
+int dispatch_replay_initialize(struct dispatch *d) {
+    if (d == NULL || d->cached_init_req == NULL) {
+        return 0;
+    }
+    /* Send the cached initialize request. We count this as one
+     * in-flight request so the bookkeeping stays consistent with
+     * how we handle real requests. */
+    send_raw_with_newline(&d->sink, 1 /* to_child */,
+                          d->cached_init_req, d->cached_init_req_len);
+    d->in_flight++;
+    d->replay_pending = 1;
+
+    /* Follow up with the initialized notification if we captured
+     * one. Notifications don't count as in-flight and don't have a
+     * response. */
+    if (d->cached_initialized_notif != NULL) {
+        send_raw_with_newline(&d->sink, 1,
+                              d->cached_initialized_notif,
+                              d->cached_initialized_notif_len);
+    }
+    return 1;
 }

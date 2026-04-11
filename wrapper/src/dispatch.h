@@ -71,10 +71,27 @@ void dispatch_on_child(struct dispatch *d, const struct mcp_msg *m);
  * upstream messages on a transition into RUNNING. */
 void dispatch_on_state_change(struct dispatch *d, enum fsm_state new_state);
 
+/* Replay the cached initialize handshake to the current child. The
+ * event loop calls this after spawning a fresh child (typically at
+ * SWAPPING -> STARTING) so the new child becomes operational without
+ * the upstream agent being told anything changed. Sends the cached
+ * initialize request followed by the cached notifications/initialized
+ * (if one was captured), and sets an internal flag so the response
+ * to the replayed initialize is consumed by the wrapper rather than
+ * forwarded upstream.
+ *
+ * Returns 1 if bytes were sent, 0 if no initialize has been cached
+ * yet (in which case the caller should fall back to whatever first-
+ * time initialization flow it knows). */
+int dispatch_replay_initialize(struct dispatch *d);
+
 /* Current in-flight request count, for tests and observability. */
 int dispatch_in_flight(const struct dispatch *d);
 
 /* Whether the first initialize response has been observed. */
 int dispatch_initialized(const struct dispatch *d);
+
+/* Whether an initialize request has been captured for replay. */
+int dispatch_has_cached_init(const struct dispatch *d);
 
 #endif /* MCPBRIDGE_DISPATCH_H */
