@@ -29,6 +29,7 @@ targets:
     - T1.10
     - T1.11
     - T1.12
+    - T1.13
     origin: manual
     discovered: 2026-04-11
   T1.1:
@@ -145,6 +146,23 @@ targets:
     - 'brew_test.go covers: outdated response with the formula present, outdated response with the formula absent (-> nil), malformed JSON (-> error), brew exit nonzero (-> error), and the upgrade happy path'
     - The package doc comment names the backing commands and notes that standard-out is parsed as JSON while standard-error is surfaced in error messages
     context: First real source backend. Pure library for now — it exposes Outdated and Upgrade methods that take a formula name and shell out to the real brew binary. The scheduler that actually calls them (on a timer) and the fsnotify integration for out-of-band detection come in T1.14. Github source lands separately in T1.13 because it needs HTTPS + download + SHA256 machinery that has nothing in common with the brew path.
+    depends_on:
+    - T1.11
+    origin: manual
+    discovered: 2026-04-12
+    achieved: 2026-04-12
+  T1.13:
+    name: The daemon has a GitHub releases source backend that fetches /releases/latest over HTTPS, downloads and SHA256-verifies the release asset, and atomically replaces the wrapped binary at its installed path.
+    status: achieved
+    value: 5.0
+    cost: 5.0
+    acceptance:
+    - daemon/internal/source/github.go defines a GitHub struct with Latest(ctx, repo) returning tag name + assets, IsNewer(installed, latest), and Install(ctx, cfg, installedVersion, destPath)
+    - Install substitutes {version}, {os}, {arch} in the asset pattern, downloads over HTTPS with a per-request timeout, verifies the SHA256 when the config names a checksum_asset, optionally unpacks a single binary out of a .tar.gz, and atomically renames into destPath (preserving the existing file's mode + ownership)
+    - HTTP side is injectable so tests can stand up an httptest.Server and point the backend at it instead of api.github.com
+    - 'github_test.go covers: latest-release JSON parsing, IsNewer table-driven cases, asset template substitution, plain-binary install happy path, checksum mismatch rejection, tar.gz extraction happy path'
+    - No third-party dependencies — uses only net/http, encoding/json, archive/tar, compress/gzip, crypto/sha256
+    context: Second source backend. Unlike brew, github hits the network directly from Go — api.github.com for the release metadata and github.com for asset downloads. Supports plain-binary assets and .tar.gz archives (single-file extraction). Tests use httptest.NewServer to stand up a fake GitHub API so the test suite never touches the real network.
     depends_on:
     - T1.11
     origin: manual

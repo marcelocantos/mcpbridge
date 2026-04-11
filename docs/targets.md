@@ -16,7 +16,7 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
-- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3, 🎯T1.4, 🎯T1.5, 🎯T1.6, 🎯T1.7, 🎯T1.6.1, 🎯T1.8, 🎯T1.9, 🎯T1.10, 🎯T1.11, 🎯T1.12, 🎯T1.13
 - **Status**: Identified
 - **Discovered**: 2026-04-11
 
@@ -50,6 +50,21 @@
   - brew_test.go covers: outdated response with the formula present, outdated response with the formula absent (-> nil), malformed JSON (-> error), brew exit nonzero (-> error), and the upgrade happy path
   - The package doc comment names the backing commands and notes that standard-out is parsed as JSON while standard-error is surfaced in error messages
 - **Context**: First real source backend. Pure library for now — it exposes Outdated and Upgrade methods that take a formula name and shell out to the real brew binary. The scheduler that actually calls them (on a timer) and the fsnotify integration for out-of-band detection come in T1.14. Github source lands separately in T1.13 because it needs HTTPS + download + SHA256 machinery that has nothing in common with the brew path.
+- **Depends on**: 🎯T1.11
+- **Status**: Achieved
+- **Discovered**: 2026-04-12
+- **Achieved**: 2026-04-12
+
+### 🎯T1.13 The daemon has a GitHub releases source backend that fetches /releases/latest over HTTPS, downloads and SHA256-verifies the release asset, and atomically replaces the wrapped binary at its installed path.
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - daemon/internal/source/github.go defines a GitHub struct with Latest(ctx, repo) returning tag name + assets, IsNewer(installed, latest), and Install(ctx, cfg, installedVersion, destPath)
+  - Install substitutes {version}, {os}, {arch} in the asset pattern, downloads over HTTPS with a per-request timeout, verifies the SHA256 when the config names a checksum_asset, optionally unpacks a single binary out of a .tar.gz, and atomically renames into destPath (preserving the existing file's mode + ownership)
+  - HTTP side is injectable so tests can stand up an httptest.Server and point the backend at it instead of api.github.com
+  - github_test.go covers: latest-release JSON parsing, IsNewer table-driven cases, asset template substitution, plain-binary install happy path, checksum mismatch rejection, tar.gz extraction happy path
+  - No third-party dependencies — uses only net/http, encoding/json, archive/tar, compress/gzip, crypto/sha256
+- **Context**: Second source backend. Unlike brew, github hits the network directly from Go — api.github.com for the release metadata and github.com for asset downloads. Supports plain-binary assets and .tar.gz archives (single-file extraction). Tests use httptest.NewServer to stand up a fake GitHub API so the test suite never touches the real network.
 - **Depends on**: 🎯T1.11
 - **Status**: Achieved
 - **Discovered**: 2026-04-12
