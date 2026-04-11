@@ -1,14 +1,24 @@
-# Binaries
-*.exe
-*.dll
+# C build artifacts (wrapper)
+*.o
+*.a
 *.so
 *.dylib
-bin/
-testdata/dummyserver/dummyserver
+/wrapper/mcpbridge
+/wrapper/build/
+/wrapper/tests/smoke_test
+/wrapper/tests/*_test
+
+# Go build artifacts (daemon)
+/daemon/mcpbridge-daemon
+
+# Local Go workspace overlay — stays in the repo because the project
+# is a single multi-module workspace, but nothing in .work or *.sum
+# for ephemeral local state would go here either.
 
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store

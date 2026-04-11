@@ -1,0 +1,49 @@
+# Targets
+
+## Active
+
+### 🎯T1 A generic C wrapper transparently proxies any stdio MCP server with automatic upgrade detection and execution, keeping the agent's MCP session alive across child restarts.
+- **Value**: 8
+- **Cost**: 13
+- **Acceptance**:
+  - Any stdio MCP server invocation can be wrapped by prepending `mcpbridge` (with `--config NAME` when the binary name is ambiguous) with no other changes required
+  - Upstream agent observes a continuous MCP session across child restarts — no visible disconnect, cached `initialize` replayed, `notifications/tools/list_changed` emitted when the tool list changes
+  - In-flight requests are never interrupted by an upgrade — state machine drains to zero before any install/swap action runs
+  - Active upgrade detection works for at least `brew`, `github`, and `cmd` source types, driven by per-server JSON configs discovered in ~/.config/mcpbridge/ and $prefix/share/mcpbridge/
+  - Passive upgrade detection via fswatch (kqueue on macOS, inotify on Linux) catches out-of-band upgrades and triggers an immediate child cycle
+  - Default upgrade mode is `notify` (detect + log + cycle on out-of-band change, but never auto-install); `auto` is opt-in per config
+  - Child lifecycle is driven by an explicit state machine with a pure `fsm_step(state, event) -> (new_state, actions)` function unit-tested without real child processes
+  - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
+  - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
+- **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
+- **Depends on**: 🎯T1.1
+- **Status**: Identified
+- **Discovered**: 2026-04-11
+
+## Achieved
+
+### 🎯T1.1 Repo is reshaped for the wrapper+daemon split: Go library deleted; wrapper/ (C) builds a stub mcpbridge binary; daemon/ (Go) builds a stub mcpbridge-daemon binary; top-level Makefile orchestrates both.
+- **Value**: 5
+- **Cost**: 3
+- **Acceptance**:
+  - All old Go library files deleted (mcpbridge.go, proxy.go, server.go, client.go, e2e_test.go, mcpbridge_test.go, go.mod, go.sum, testdata/)
+  - Top-level Makefile orchestrates both subdirs; `make` builds both the C wrapper and the Go daemon
+  - wrapper/ contains the C scaffolding (Makefile, src/main.c, src/log.*, src/util.*, tests/smoke_test.c, vendor/cjson/)
+  - wrapper/ `make` produces a stub mcpbridge binary that responds to --version / --help / --help-agent
+  - wrapper/ `make test` passes
+  - daemon/ contains a Go module (go.mod) with cmd/mcpbridge-daemon/main.go producing a stub that responds to --version / --help
+  - daemon/ `go test ./...` passes
+  - top-level `make test` runs both test suites
+  - .gitignore covers C and Go build artifacts
+  - README.md explains the two-process model at a high level
+- **Context**: First sub-target of 🎯T1. After the strategy pivot, mcpbridge is split into two processes: a C stdio wrapper (per MCP server) and a Go daemon (one per user session, run under brew services). This target establishes the two-subdirectory layout and proves both build. Real behavior lands in later sub-targets.
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
+## Graph
+
+```mermaid
+graph TD
+    T1["A generic C wrapper transpare…"]
+```
