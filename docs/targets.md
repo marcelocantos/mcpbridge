@@ -16,6 +16,21 @@
   - Code is C11, POSIX.1-2008, compiles with a hand-written Makefile, depends on nothing beyond libc and vendored cJSON, and shells out for HTTP/package-manager actions rather than linking libcurl or similar
   - macOS arm64 and Linux x86_64/arm64 supported; Windows deferred
 - **Context**: Today mcpbridge is a Go library for building daemon+proxy MCP servers (used by mnemo). That solves daemon-side auto-upgrade but leaves stdio MCP servers unaddressed. The new direction is a generic binary `mcpbridge` (written in C for long-term zero-maintenance longevity) that a user prepends to any MCP server invocation in their client config. It speaks MCP to the agent on stdio, spawns the wrapped server as a child, forwards MCP messages protocol-aware (so it can cache `initialize` and replay on child restart), detects when a new version of the wrapped server is available (active polling primary, fswatch fallback for user-initiated upgrades), drains in-flight requests, runs the upgrade action, and cycles the child — all invisible to the upstream agent. Per-server upgrade metadata lives in JSON config files (shipped by the server author or handcrafted locally) discovered from ~/.config/mcpbridge/ and $prefix/share/mcpbridge/. Core correctness comes from an explicit child-lifecycle state machine (STARTING/RUNNING/DRAINING/UPGRADING/SWAPPING/RESPAWN/FAILED) driven by events from the upstream reader, child reader, signals, timers, and the upgrade detector. Language choice is locked to C11 + POSIX.1-2008 + plain Makefile + vendored cJSON + shell-out to curl/brew/sha256sum for external actions — chosen explicitly so the code compiles unchanged for as long as humanly possible. The existing Go library either stays under a `go/` subdirectory or moves to its own repo (decision deferred to planning).
+- **Depends on**: 🎯T1.1, 🎯T1.2, 🎯T1.3
+- **Status**: Identified
+- **Discovered**: 2026-04-11
+
+### 🎯T1.3 The wrapper has a complete MCP framing + parsing module (mcp.c / mcp.h) with unit tests covering initialize, tools/list, tools/call, notifications, id tracking, and framing edge cases.
+- **Value**: 5
+- **Cost**: 5
+- **Acceptance**:
+  - wrapper/src/mcp.h declares types and functions for: parsing one newline-delimited JSON-RPC message from a byte buffer, identifying message kind (request/response/notification), extracting method name + id, pulling out the initialize-response payload for caching, and emitting a notifications/tools/list_changed message
+  - wrapper/src/mcp.c implements the above using vendored cJSON with strict validation (no trust of upstream)
+  - JSON-RPC ids handled as either number or string (stored as a tagged union or string-normalised form)
+  - Streaming line reader caps individual messages at 4 MB; longer messages are rejected cleanly with a descriptive error
+  - wrapper/tests/mcp_test.c unit-tests every function with golden inputs: well-formed initialize, well-formed tools/list, well-formed tools/call, a notification with no id, a malformed message, a message at the size cap, an id that is a string, and an id that is a float (rejected cleanly)
+  - make test passes the mcp_test binary
+- **Context**: The wrapper needs to parse MCP messages to do its job: it must recognise initialize (for caching + replay), tools/list (for diffing), tools/call (for in-flight id tracking), notifications (pass-through vs emit), and it must produce well-formed MCP messages of its own (replay initialize, emit tools/list_changed). This module is pure: no I/O, no state machine dependencies, just bytes in -> structured view out, and structured form -> bytes out. First real C module after the skeleton; unblocks the state machine (T1.4).
 - **Depends on**: 🎯T1.1
 - **Status**: Identified
 - **Discovered**: 2026-04-11
@@ -41,9 +56,26 @@
 - **Discovered**: 2026-04-11
 - **Achieved**: 2026-04-11
 
+### 🎯T1.2 Wire protocol between wrapper and daemon is specified in docs/wire-protocol.md: socket path, framing, message shapes for register / deregister / reload / shutdown.
+- **Value**: 3
+- **Cost**: 2
+- **Acceptance**:
+  - docs/wire-protocol.md exists and specifies: socket path resolution (per-platform), line framing, message envelope, and every message type the wrapper and daemon exchange in v1
+  - Socket path rules documented: $XDG_RUNTIME_DIR/mcpbridge/daemon.sock on Linux, ~/Library/Caches/mcpbridge/daemon.sock on macOS, with explicit fallback to $TMPDIR/mcpbridge-$UID/daemon.sock when the preferred location is unavailable
+  - Messages specified: register (wrapper -> daemon), deregister (wrapper -> daemon), reload (daemon -> wrapper), shutdown (daemon -> wrapper), plus a version/hello exchange on connect
+  - Schema version field documented so the protocol can evolve without breaking older wrappers/daemons
+  - Reconnect/backoff behaviour documented: wrapper retries the socket with backoff starting at 1s capped at 5s, logs once on first failure
+- **Context**: Both the C wrapper and the Go daemon need to agree on a wire format before either can implement its side. Writing this down first prevents drift and gives both implementations something to test against. The protocol is newline-delimited JSON-RPC-ish (not strict JSON-RPC 2.0 — we don't need method/id/result complexity for a few message types) over a user-local Unix domain socket. Keep it tiny: four message types in v1, schema version field for forward compat.
+- **Depends on**: 🎯T1.1
+- **Status**: Achieved
+- **Discovered**: 2026-04-11
+- **Achieved**: 2026-04-11
+
 ## Graph
 
 ```mermaid
 graph TD
     T1["A generic C wrapper transpare…"]
+    T1_3["The wrapper has a complete MC…"]
+    T1 -.->|needs| T1_3
 ```
