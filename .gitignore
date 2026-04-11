@@ -12,6 +12,10 @@
 
 # Go build artifacts (daemon)
 /daemon/mcpbridge-daemon
+# Staged copy of agents-guide.md for the daemon's go:embed. Source
+# of truth is the repo-root agents-guide.md; the Makefile copies it
+# into place before building.
+/daemon/cmd/mcpbridge-daemon/help_agent.md
 
 # Local Go workspace overlay — stays in the repo because the project
 # is a single multi-module workspace, but nothing in .work or *.sum

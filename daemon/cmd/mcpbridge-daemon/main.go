@@ -15,7 +15,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	_ "embed"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -30,6 +32,9 @@ import (
 	"github.com/marcelocantos/mcpbridge/daemon/internal/source"
 	"github.com/marcelocantos/mcpbridge/daemon/internal/watcher"
 )
+
+//go:embed help_agent.md
+var helpAgentMD string
 
 // Version is injected at build time via -ldflags "-X main.Version=...".
 var Version = "0.0.0-dev"
@@ -70,6 +75,7 @@ Options:
   -v, --verbose    extra logging
   --version        print version and exit
   --help           print this help and exit
+  --help-agent     print help followed by the mcpbridge agent guide
 
 Signals:
   SIGHUP           broadcast a manual reload to all connected wrappers
@@ -82,14 +88,16 @@ func main() {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usageText) }
 
 	var (
-		showVersion bool
-		showHelp    bool
-		verbose     bool
-		sockPath    string
+		showVersion    bool
+		showHelp       bool
+		showHelpAgent  bool
+		verbose        bool
+		sockPath       string
 	)
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	fs.BoolVar(&showHelp, "help", false, "print help and exit")
 	fs.BoolVar(&showHelp, "h", false, "print help and exit")
+	fs.BoolVar(&showHelpAgent, "help-agent", false, "print agent-oriented help and exit")
 	fs.BoolVar(&verbose, "verbose", false, "verbose logging")
 	fs.BoolVar(&verbose, "v", false, "verbose logging")
 	fs.StringVar(&sockPath, "socket", "", "override socket path")
@@ -103,6 +111,18 @@ func main() {
 	}
 	if showHelp {
 		fmt.Fprint(os.Stdout, usageText)
+		return
+	}
+	if showHelpAgent {
+		// Print the usage text followed by the embedded agent
+		// guide so a coding agent gets both the CLI flag
+		// reference and the full install + troubleshooting
+		// guide in one call.
+		var buf bytes.Buffer
+		buf.WriteString(usageText)
+		buf.WriteString("\n")
+		buf.WriteString(helpAgentMD)
+		fmt.Fprint(os.Stdout, buf.String())
 		return
 	}
 
