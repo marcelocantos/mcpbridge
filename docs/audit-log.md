@@ -7,7 +7,7 @@ format.
 
 ## 2026-04-12 — /release v0.2.0
 
-- **Commit**: pending
+- **Commit**: `b9a3305`
 - **Outcome**: Shipped fix for API surface continuity across
   reloads. After a successful child replay, dispatch now emits
   all three `*_list_changed` notifications (tools / prompts /
