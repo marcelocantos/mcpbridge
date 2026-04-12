@@ -4,6 +4,8 @@ mcpbridge is a pre-1.0 project. This document tracks the public
 interaction surface and what still needs to settle before a 1.0
 release.
 
+Snapshot as of: **v0.2.0**.
+
 ## Stability commitment
 
 **Once mcpbridge ships 1.0, the public interaction surface below
@@ -17,7 +19,7 @@ Pre-1.0 exists so we can get this surface right before the
 contract takes effect. Annotations below mark which items are
 settled vs. still under review vs. actively fluid.
 
-## Interaction surface (v0.1.0 snapshot)
+## Interaction surface
 
 ### `mcpbridge` CLI (C wrapper)
 
@@ -183,21 +185,66 @@ These must be addressed before the v1.0.0 release can ship.
    explicitly. Before 1.0, decide whether this is documented-as-
    required or whether we grow smarter inference.
 
-3. **Reload failure modes not exercised.** `reload_ack` defines
-   `drain_timeout`, `spawn_failed`, `init_failed` status values
-   but nothing in the scheduler currently reacts to them. Before
-   1.0, the scheduler should treat non-ok ack statuses as signal
-   to back off or retry rather than ignore them.
+3. **API surface continuity across reloads.** When the new child
+   after a reload exposes a different surface than the old one,
+   the agent's worldview has to catch up.
+
+   **What v0.2.0 ships:** after a successful replay, dispatch
+   unconditionally emits `notifications/tools/list_changed`,
+   `notifications/prompts/list_changed`, and
+   `notifications/resources/list_changed` upstream. Agents react
+   by refetching each list, so added / removed / renamed /
+   reschemaed items on the new child become visible without any
+   diffing state on the wrapper side. This is the common case —
+   an MCP server upgrade that adds a tool or tightens a schema.
+
+   **What's still deferred to 1.0:**
+
+   - **capabilities diff.** MCP's `initialize` handshake
+     negotiates `capabilities` once per session and has no
+     mid-session renegotiation mechanism. If the new child
+     advertises different capabilities, the wrapper today
+     silently replaces the cached init response and the agent
+     is left holding a stale view. The 1.0 fix is to parse the
+     new init response, diff `capabilities` and
+     `protocolVersion` against the cached one, log a structured
+     warning when they differ, and surface the divergence via
+     `reload_ack`'s `detail` field so the daemon can log a
+     forensic record. That's not a fix (there's nothing we can
+     do for the agent short of forcing a reconnect), but it
+     turns a silent correctness bug into a visible operational
+     one.
+
+   - **reload_ack failure statuses acted on.** The `reload_ack`
+     envelope already defines `drain_timeout`, `spawn_failed`,
+     and `init_failed` values alongside `ok`, but nothing in
+     the scheduler currently reacts to them — the daemon logs
+     and continues, and the next poll triggers another upgrade
+     attempt regardless. Before 1.0, the scheduler should
+     treat non-`ok` ack statuses as signal to back off the
+     source for that config (configurable cooldown) and surface
+     a health indicator via a future `status` RPC.
+
+   - **Eager tools/list diff instead of unconditional emission.**
+     v0.2.0's "just emit three notifications" approach is
+     correct but wasteful when the new child's surface is
+     identical to the old one. A diff-on-the-wrapper-side
+     implementation would suppress the notifications when the
+     cached and new `tools/list` match byte-for-byte. Not
+     urgent; the waste is a single refetch per reload.
 
 4. **No HTTP transport in the wrapper.** Only stdio children are
    supported. The original plan included localhost HTTP MCP
    servers (plain HTTP, no TLS). This is tracked but not blocking
    1.0 — adding HTTP after 1.0 is additive.
 
-5. **No GitHub release publishing automation.** The Homebrew
-   formula's `url` and `sha256` need manual bumping on each
-   release. 1.0 should ship with a release workflow that handles
-   this end-to-end.
+5. **No GitHub release publishing automation beyond what's
+   shipped.** The Homebrew formula publishing is automated via
+   homebrew-releaser, but version strings in source files remain
+   injected from `VERSION=<tag>` at `make` time — there's no
+   check that a commit hasn't accidentally hardcoded `0.0.0-dev`
+   somewhere that bypasses the injection. A pre-tag lint would
+   be nice.
 
 6. **No mnemo-side integration.** The old Go library in this repo
    was deleted on the assumption mnemo would be reworked to target

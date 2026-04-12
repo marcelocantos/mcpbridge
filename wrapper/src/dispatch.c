@@ -209,6 +209,22 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
 
 /* ---------- Child (child -> wrapper -> agent) ---------- */
 
+/* Send a list_changed notification of the given kind to upstream.
+ * Used after a successful replay to prompt the agent to refetch
+ * tools / prompts / resources from the new child. Silently no-ops
+ * on allocation failure or an unknown kind — the agent will still
+ * see correct output on its next explicit fetch; the notification
+ * is a best-effort prompt, not a correctness requirement. */
+static void emit_list_changed_upstream(struct dispatch *d, const char *kind) {
+    size_t len = 0;
+    char *buf = mcp_build_list_changed(kind, &len);
+    if (buf == NULL) {
+        return;
+    }
+    d->sink.send_upstream(d->sink.ctx, buf, len);
+    free(buf);
+}
+
 void dispatch_on_child(struct dispatch *d, const struct mcp_msg *m) {
     if (d == NULL || m == NULL || m->raw == NULL) {
         return;
@@ -219,11 +235,26 @@ void dispatch_on_child(struct dispatch *d, const struct mcp_msg *m) {
      * see on this new connection is that replayed init's answer.
      * The agent already has an initialize response from the previous
      * child, so we DO NOT forward the new one — we just emit
-     * INITIALIZE_OK (or _FAILED) to advance the FSM. */
+     * INITIALIZE_OK (or _FAILED) to advance the FSM.
+     *
+     * On a successful replay, the new child may expose a different
+     * tools / prompts / resources surface than the one the agent
+     * saw originally. MCP has standard notifications for each of
+     * those — emit all three unconditionally. The agent reacts by
+     * re-fetching each list, which is cheap and avoids the wrapper
+     * having to maintain its own cached view for diffing. Changes
+     * to capabilities or protocolVersion have no MCP notification
+     * to carry them and are documented as unsupported across a
+     * reload — see STABILITY.md. */
     if (d->replay_pending && m->kind == MCP_KIND_RESPONSE) {
         d->replay_pending = 0;
         if (d->in_flight > 0) {
             d->in_flight--;
+        }
+        if (!m->is_error) {
+            emit_list_changed_upstream(d, "tools");
+            emit_list_changed_upstream(d, "prompts");
+            emit_list_changed_upstream(d, "resources");
         }
         enum fsm_event ev = m->is_error
             ? FSM_EV_INITIALIZE_FAILED
