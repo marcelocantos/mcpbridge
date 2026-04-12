@@ -351,11 +351,11 @@ static void test_reader_growth(void) {
     mcp_reader_free(&r);
 }
 
-/* ---------- mcp_build_tools_list_changed ---------- */
+/* ---------- mcp_build_list_changed ---------- */
 
-static void test_build_list_changed(void) {
+static void check_list_changed_kind(const char *kind, const char *expected_method) {
     size_t len = 0;
-    char *msg = mcp_build_tools_list_changed(&len);
+    char *msg = mcp_build_list_changed(kind, &len);
     CHECK(msg != NULL, "built");
     CHECK(len > 0, "non-empty");
     CHECK(msg[len - 1] == '\n', "newline-terminated");
@@ -365,10 +365,22 @@ static void test_build_list_changed(void) {
     int rc = mcp_msg_parse(msg, len - 1, &parsed); /* strip trailing \n */
     CHECK(rc == MCP_PARSE_OK, "emitted notification parses");
     CHECK(parsed.kind == MCP_KIND_NOTIFICATION, "is notification");
-    CHECK(mcp_msg_is_notification(&parsed, "notifications/tools/list_changed"),
+    CHECK(mcp_msg_is_notification(&parsed, expected_method),
           "method matches");
     mcp_msg_free(&parsed);
     free(msg);
+}
+
+static void test_build_list_changed(void) {
+    check_list_changed_kind("tools",     "notifications/tools/list_changed");
+    check_list_changed_kind("prompts",   "notifications/prompts/list_changed");
+    check_list_changed_kind("resources", "notifications/resources/list_changed");
+
+    /* Unknown kinds return NULL. */
+    CHECK(mcp_build_list_changed("nope", NULL) == NULL,
+          "unknown kind rejected");
+    CHECK(mcp_build_list_changed(NULL, NULL) == NULL,
+          "NULL kind rejected");
 }
 
 int main(void) {

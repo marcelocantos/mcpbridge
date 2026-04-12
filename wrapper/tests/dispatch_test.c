@@ -499,14 +499,28 @@ static void test_replay_response_consumed_not_forwarded(void) {
     CHECK(dispatch_in_flight(d) == 1, "in_flight=1 after replay");
 
     /* The new child responds to the replayed initialize. */
-    size_t upstream_bytes_before = sink_state.up_len;
     struct mcp_msg replay_resp = parse_or_die(
         "{\"jsonrpc\":\"2.0\",\"id\":1,"
         "\"result\":{\"serverInfo\":{\"name\":\"x\",\"version\":\"2\"}}}");
     dispatch_on_child(d, &replay_resp);
 
-    CHECK(sink_state.up_len == upstream_bytes_before,
-          "replay response NOT forwarded upstream");
+    /* The init response bytes themselves (the distinguishing
+     * "serverInfo" marker) must NOT appear upstream — the agent
+     * already has an initialize response from the first child. */
+    sink_state.up_buf[sink_state.up_len < FAKE_BUF_CAP
+                         ? sink_state.up_len : FAKE_BUF_CAP - 1] = '\0';
+    CHECK(strstr(sink_state.up_buf, "serverInfo") == NULL,
+          "replay response bytes NOT forwarded upstream");
+    /* But three list_changed notifications MUST have been emitted
+     * so the agent refetches tools / prompts / resources from the
+     * new child. */
+    CHECK(strstr(sink_state.up_buf, "notifications/tools/list_changed") != NULL,
+          "tools/list_changed emitted on successful replay");
+    CHECK(strstr(sink_state.up_buf, "notifications/prompts/list_changed") != NULL,
+          "prompts/list_changed emitted on successful replay");
+    CHECK(strstr(sink_state.up_buf, "notifications/resources/list_changed") != NULL,
+          "resources/list_changed emitted on successful replay");
+
     CHECK(dispatch_in_flight(d) == 0, "in_flight decremented to 0");
     CHECK(sink_state.event_count == 1, "one event emitted by replay consume");
     CHECK(sink_state.events[0] == FSM_EV_INITIALIZE_OK,
@@ -528,6 +542,55 @@ static void test_replay_response_consumed_not_forwarded(void) {
     mcp_msg_free(&replay_resp);
     mcp_msg_free(&ping);
     mcp_msg_free(&pong);
+    dispatch_free(d);
+}
+
+static void test_replay_error_no_list_changed(void) {
+    /* If the replayed initialize comes back as an error, the
+     * wrapper must emit INITIALIZE_FAILED and must NOT emit any
+     * list_changed notifications — there's no new surface to
+     * refetch, the session is about to die. */
+    struct fsm f;
+    fsm_init(&f);
+    fsm_step(&f, FSM_EV_INITIALIZE_OK); /* RUNNING */
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    /* Prime the cache. */
+    struct mcp_msg req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+    struct mcp_msg first_resp = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
+    dispatch_on_upstream(d, &req);
+    dispatch_on_child(d, &first_resp);
+
+    memset(&sink_state, 0, sizeof(sink_state));
+    dispatch_replay_initialize(d);
+
+    /* Error response on the replay. */
+    struct mcp_msg err_resp = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,"
+        "\"error\":{\"code\":-32000,\"message\":\"child refused\"}}");
+    dispatch_on_child(d, &err_resp);
+
+    sink_state.up_buf[sink_state.up_len < FAKE_BUF_CAP
+                         ? sink_state.up_len : FAKE_BUF_CAP - 1] = '\0';
+    CHECK(strstr(sink_state.up_buf, "list_changed") == NULL,
+          "no list_changed notifications on replay error");
+    CHECK(sink_state.event_count == 1, "one event emitted");
+    CHECK(sink_state.events[0] == FSM_EV_INITIALIZE_FAILED,
+          "INITIALIZE_FAILED emitted");
+
+    mcp_msg_free(&req);
+    mcp_msg_free(&first_resp);
+    mcp_msg_free(&err_resp);
     dispatch_free(d);
 }
 
@@ -563,6 +626,7 @@ int main(void) {
     test_initialize_cached_on_first_sighting();
     test_replay_sends_cached_bytes_to_child();
     test_replay_response_consumed_not_forwarded();
+    test_replay_error_no_list_changed();
     test_replay_noop_without_cache();
 
     if (fail_count > 0) {

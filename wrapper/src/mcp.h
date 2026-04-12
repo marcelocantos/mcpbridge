@@ -159,9 +159,12 @@ int mcp_reader_pop(struct mcp_reader *r, const char **line, size_t *len);
 
 /* ---------- Message construction ---------- */
 
-/* Build a `notifications/tools/list_changed` notification as
- * newline-terminated bytes. Caller owns the returned buffer (free()
- * when done). Returns NULL on allocation failure. */
-char *mcp_build_tools_list_changed(size_t *out_len);
+/* Build a list_changed notification for the given MCP namespace.
+ * `kind` must be one of "tools", "prompts", "resources"; any other
+ * value returns NULL. The returned buffer is a complete envelope
+ * terminated by a single '\n', ready to write to a socket. Caller
+ * owns the buffer (free() when done). out_len, if non-NULL,
+ * receives the buffer length in bytes (including the newline). */
+char *mcp_build_list_changed(const char *kind, size_t *out_len);
 
 #endif /* MCPBRIDGE_MCP_H */

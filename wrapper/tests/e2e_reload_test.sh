@@ -153,6 +153,18 @@ if [ "$init_count" != "1" ]; then
     exit 1
 fi
 
+# The wrapper must emit all three list_changed notifications after
+# the reload so the agent refetches tools / prompts / resources
+# from the (potentially changed) new child. See STABILITY.md
+# "API surface continuity across reloads".
+for kind in tools prompts resources; do
+    if ! grep -q "\"notifications/${kind}/list_changed\"" "$WRAPPER_OUT"; then
+        echo "reload e2e: ${kind}/list_changed notification missing" >&2
+        cat "$WRAPPER_OUT" >&2
+        exit 1
+    fi
+done
+
 # The daemon log should show the reload broadcast and the reload_ack.
 if ! grep -q 'SIGHUP' "$DAEMON_ERR"; then
     echo "reload e2e: daemon didn't log SIGHUP broadcast" >&2

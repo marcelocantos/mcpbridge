@@ -5,6 +5,27 @@ Maintenance actions taken on this repo by `/audit`, `/docs`,
 the top. See `~/.claude/skills/audit-log-convention.md` for the
 format.
 
+## 2026-04-12 — /release v0.2.0
+
+- **Commit**: pending
+- **Outcome**: Shipped fix for API surface continuity across
+  reloads. After a successful child replay, dispatch now emits
+  all three `*_list_changed` notifications (tools / prompts /
+  resources) upstream so the agent refetches each list from the
+  new child. Previously the wrapper silently replaced the cached
+  init response and left the agent with a stale surface view —
+  material regression in tool availability whenever a wrapped
+  server's upgrade added, removed, renamed, or reschemaed any
+  tool. `STABILITY.md` restructured to frame the fix as the
+  first instalment of a broader "API surface continuity" gap;
+  capabilities diff and reload_ack failure-status handling are
+  still pre-1.0 prerequisites. The previously-unused
+  `mcp_build_tools_list_changed` helper was refactored into a
+  generic `mcp_build_list_changed(kind, out_len)`. Test coverage
+  added at every layer (mcp_test for the builder, dispatch_test
+  for the replay success + error paths, e2e_reload_test.sh for
+  the wire-level assertion).
+
 ## 2026-04-12 — /release v0.1.0
 
 - **Commit**: `ca306cd`

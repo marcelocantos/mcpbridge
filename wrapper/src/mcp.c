@@ -401,12 +401,37 @@ int mcp_reader_pop(struct mcp_reader *r, const char **line, size_t *len) {
 
 /* ---------- Message construction ---------- */
 
-char *mcp_build_tools_list_changed(size_t *out_len) {
-    static const char msg[] =
+char *mcp_build_list_changed(const char *kind, size_t *out_len) {
+    /* Three canonical namespaces. Hard-coded so we never generate a
+     * malformed envelope and never have to reason about format
+     * strings. Adding new kinds is one more case label. */
+    static const char tools_msg[] =
         "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n";
-    size_t len = sizeof(msg) - 1; /* exclude terminating NUL */
+    static const char prompts_msg[] =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/prompts/list_changed\"}\n";
+    static const char resources_msg[] =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/list_changed\"}\n";
+
+    const char *src = NULL;
+    size_t len = 0;
+    if (kind == NULL) {
+        return NULL;
+    }
+    if (strcmp(kind, "tools") == 0) {
+        src = tools_msg;
+        len = sizeof(tools_msg) - 1; /* exclude terminating NUL */
+    } else if (strcmp(kind, "prompts") == 0) {
+        src = prompts_msg;
+        len = sizeof(prompts_msg) - 1;
+    } else if (strcmp(kind, "resources") == 0) {
+        src = resources_msg;
+        len = sizeof(resources_msg) - 1;
+    } else {
+        return NULL;
+    }
+
     char *buf = xmalloc(len);
-    memcpy(buf, msg, len);
+    memcpy(buf, src, len);
     if (out_len != NULL) {
         *out_len = len;
     }
