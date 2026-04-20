@@ -39,6 +39,7 @@ CORE_SRCS  = \
     src/mcp.c \
     src/fsm.c \
     src/transport_stdio.c \
+    src/transport_http.c \
     src/dispatch.c \
     src/daemon_client.c
 
@@ -54,8 +55,8 @@ TEST_HELPERS = tests/fake_echo tests/fake_mcp
 
 BIN        = mcpbridge
 TEST_BINS  = tests/smoke_test tests/mcp_test tests/fsm_test \
-             tests/transport_stdio_test tests/dispatch_test \
-             tests/daemon_client_test
+             tests/transport_stdio_test tests/transport_http_test \
+             tests/dispatch_test tests/daemon_client_test
 
 .PHONY: all test clean install
 
@@ -98,6 +99,14 @@ tests/transport_stdio_test: tests/transport_stdio_test.o \
                             $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o) \
                             tests/fake_echo
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/transport_stdio_test.o \
+	    $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+
+# transport_http_test forks a tiny in-test HTTP MCP server from the
+# same binary (no helper process), so it links only against the core
+# library.
+tests/transport_http_test: tests/transport_http_test.o \
+                           $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/transport_http_test.o \
 	    $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
 tests/dispatch_test: tests/dispatch_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)

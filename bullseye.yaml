@@ -473,10 +473,11 @@ targets:
     achieved: 2026-04-20
   T3.2:
     name: '`transport_http.{c,h}` implements the message-oriented transport vtable over MCP Streamable HTTP (POST + SSE) against plain `http://localhost` URLs.'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
+    actual_cost: 8.0
     acceptance:
     - 'New `wrapper/src/transport_http.{c,h}` implements the message-oriented `struct transport_ops` from T3.1 against an MCP Streamable HTTP endpoint: HTTP/1.1 POST for client→server JSON-RPC, SSE (`text/event-stream`) for server→client messages, single URL for both directions.'
     - 'Scope cap for v1: plain `http://` to localhost only. `https://` URLs and non-localhost hosts are rejected at construction time with a descriptive error. TLS and remote URLs are explicitly deferred to a later target.'
@@ -484,7 +485,12 @@ targets:
     - 'Unit tests stand up a fake HTTP MCP server (e.g. via a minimal in-process listener) and exercise: initialize round-trip, tools/list round-trip, notification delivery over SSE, connection drop + reconnect.'
     - The transport is not yet wired into `main.c` — this target only lands the implementation and its tests. Integration (the `--url` flag and reload cycle) comes in T3.3.
     - '`make test` in `wrapper/` passes with the new `transport_http_test` binary included.'
-    context: 'Second sub-target of 🎯T3. Depends on T3.1 (needs the message-oriented vtable). Introduces the HTTP transport as a standalone module with its own tests, deliberately not yet hooked into the event loop. This separation keeps the change surface small and allows the transport to be iterated on without affecting the stdio path. Transparency invariant (see architecture_transparency memory): the wrapped HTTP server requires no modification and has no way to detect it is being proxied.'
+    context: |-
+      Second sub-target of 🎯T3. Depends on T3.1 (needs the message-oriented vtable). Introduces the HTTP transport as a standalone module with its own tests, deliberately not yet hooked into the event loop. This separation keeps the change surface small and allows the transport to be iterated on without affecting the stdio path. Transparency invariant (see architecture_transparency memory): the wrapped HTTP server requires no modification and has no way to detect it is being proxied.
+
+      Scope cut for v1 (refinement made during implementation planning, 2026-04-19): **POST-only — no standing GET SSE connection.** Outbound client→server traffic goes over per-request POSTs; responses may be plain `application/json` or `text/event-stream` (POST-scoped SSE) — both paths are supported. The transport does NOT open a persistent GET SSE stream for server-initiated notifications outside of a POST response. Consequence: unsolicited server pushes (e.g. progress mid-idle, list_changed outside a reload window) are not delivered. This is acceptable for v1 because mcpbridge's core value (session continuity across upgrades) doesn't depend on them, and the fake-server test still exercises SSE notification delivery via POST-response SSE. Standing GET SSE is deferred to a follow-on target if needed.
+
+      Implementation note: the transport uses an internal self-pipe so the single-fd event loop has a stable poll_fd regardless of whether a POST is in flight. send() does a synchronous POST, parses the response, queues inbound messages, and writes one byte to the pipe. pump() drains the pipe and pops from the queue. Single-threaded throughout; no pthreads dependency.
     depends_on:
     - T3.1
     tags:
@@ -493,6 +499,7 @@ targets:
     - http
     origin: manual
     discovered: 2026-04-19
+    achieved: 2026-04-20
   T3.3:
     name: '`main.c` accepts `--url URL` selecting the HTTP backend, and the reload cycle (re-dial + cached-initialize replay) works end-to-end against a live HTTP MCP daemon.'
     status: identified
