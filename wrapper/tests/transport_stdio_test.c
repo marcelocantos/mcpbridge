@@ -3,11 +3,14 @@
 
 /* Integration test for the stdio transport.
  *
- * Spawns the fake_echo child via the transport, writes a payload,
- * reads it back, then stops cleanly and checks the exit status. If
- * anything hangs for longer than a short deadline, the test aborts
- * the process itself so a regression shows up as a timeout rather
- * than a silent hang. */
+ * Spawns the fake_echo child via the transport, sends a newline-
+ * framed MCP-shaped message, then pumps to collect the echoed
+ * message via the transport's on_message callback. Verifies the
+ * round-trip preserves payload bytes (without the wire-level
+ * newline, which framing consumes). Then stops cleanly and checks
+ * the exit status. If anything hangs for longer than a short
+ * deadline, the test aborts the process itself so a regression
+ * shows up as a timeout rather than a silent hang. */
 
 #include "../src/transport.h"
 #include "../src/transport_stdio.h"
@@ -41,34 +44,51 @@ static void install_watchdog(void) {
     alarm(5);
 }
 
-/* Read up to want bytes, blocking up to timeout_ms via poll().
- * Returns the number of bytes read, 0 on EOF, -1 on timeout. */
-static ssize_t read_with_timeout(struct transport *t,
-                                 void *buf, size_t want, int timeout_ms) {
-    int fd = transport_read_fd(t);
-    char *p = buf;
-    size_t got = 0;
-    while (got < want) {
+/* Collector for pump() callbacks. Concatenates every message body
+ * delivered (each one already stripped of its trailing newline) into
+ * a fixed buffer with inter-message '\n' separators, so the test can
+ * assert exact expected payloads. */
+struct collector {
+    char   buf[256];
+    size_t len;
+    int    count;
+};
+
+static void collect_message(void *vctx, const char *line, size_t len) {
+    struct collector *c = vctx;
+    if (c->count > 0 && c->len < sizeof(c->buf)) {
+        c->buf[c->len++] = '\n';
+    }
+    size_t room = sizeof(c->buf) - c->len;
+    size_t take = len < room ? len : room;
+    memcpy(c->buf + c->len, line, take);
+    c->len += take;
+    c->count++;
+}
+
+/* Pump until the collector has seen at least `want_messages` complete
+ * messages or the deadline elapses. Returns the number of messages
+ * collected. */
+static int pump_until(struct transport *t, struct collector *c,
+                      int want_messages, int timeout_ms) {
+    int fd = transport_poll_fd(t);
+    const int step_ms = timeout_ms;
+    while (c->count < want_messages) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        int pr = poll(&pfd, 1, timeout_ms);
+        int pr = poll(&pfd, 1, step_ms);
         if (pr == 0) {
-            return -1; /* timeout */
+            break; /* timeout */
         }
         if (pr < 0) {
             if (errno == EINTR) continue;
-            return -1;
+            break;
         }
-        ssize_t r = transport_read(t, p + got, want - got);
-        if (r == 0) {
-            return (ssize_t)got;
+        int r = transport_pump(t, collect_message, c);
+        if (r == 1 || r < 0) {
+            break;
         }
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return -1;
-        }
-        got += (size_t)r;
     }
-    return (ssize_t)got;
+    return c->count;
 }
 
 static void test_round_trip(void) {
@@ -78,20 +98,22 @@ static void test_round_trip(void) {
 
     int rc = transport_start(t);
     CHECK(rc == 0, "transport started");
-    CHECK(transport_read_fd(t) >= 0, "read_fd set");
-    CHECK(transport_write_fd(t) >= 0, "write_fd set");
+    CHECK(transport_poll_fd(t) >= 0, "poll_fd set");
     CHECK(transport_stdio_pid(t) > 0, "pid recorded");
 
     const char payload[] = "hello, transport\n";
     const size_t plen = sizeof(payload) - 1;
 
-    ssize_t w = transport_write(t, payload, plen);
-    CHECK(w == (ssize_t)plen, "payload written");
+    rc = transport_send(t, payload, plen);
+    CHECK(rc == 0, "payload sent");
 
-    char buf[64] = {0};
-    ssize_t r = read_with_timeout(t, buf, plen, 2000);
-    CHECK(r == (ssize_t)plen, "payload read back");
-    CHECK(memcmp(buf, payload, plen) == 0, "bytes match verbatim");
+    struct collector coll = {0};
+    int got = pump_until(t, &coll, 1, 2000);
+    CHECK(got == 1, "one complete message collected");
+    /* The transport strips the trailing newline as part of framing,
+     * so the collector sees "hello, transport" without the \n. */
+    CHECK(coll.len == plen - 1, "collected length matches payload minus framing newline");
+    CHECK(memcmp(coll.buf, payload, plen - 1) == 0, "bytes match verbatim");
 
     /* Before stopping, verify reap reports still-running. */
     int status = -1;
@@ -114,10 +136,15 @@ static void test_destroy_without_start(void) {
     transport_destroy(t);
 }
 
+/* no-op callback: we only care about EOF detection in this test. */
+static void ignore_message(void *vctx, const char *line, size_t len) {
+    (void)vctx; (void)line; (void)len;
+}
+
 static void test_exec_failure(void) {
-    /* An nonexistent command should fail either at fork time (rare)
+    /* A nonexistent command should fail either at fork time (rare)
      * or at exec time (the child exits 127 immediately). The parent
-     * sees start() succeed (fork worked) but subsequent reads hit
+     * sees start() succeed (fork worked) but subsequent pumps hit
      * EOF quickly, and reap reports exit 127. */
     char *argv[] = { (char *)"/nonexistent/mcpbridge-fake-binary", NULL };
     struct transport *t = transport_stdio_new(
@@ -127,9 +154,26 @@ static void test_exec_failure(void) {
     int rc = transport_start(t);
     CHECK(rc == 0, "fork path succeeded (exec failure is in the child)");
 
-    char buf[16];
-    ssize_t r = read_with_timeout(t, buf, sizeof(buf), 2000);
-    CHECK(r == 0, "read sees EOF after child exec failure");
+    /* Poll for readability (which will show up as POLLHUP once the
+     * child has exited), then pump until we see the EOF return. */
+    int saw_eof = 0;
+    for (int i = 0; i < 100 && !saw_eof; i++) {
+        int fd = transport_poll_fd(t);
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int pr = poll(&pfd, 1, 50);
+        if (pr == 0) continue;
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        int r = transport_pump(t, ignore_message, NULL);
+        if (r == 1) {
+            saw_eof = 1;
+            break;
+        }
+        if (r < 0) break;
+    }
+    CHECK(saw_eof, "pump sees EOF after child exec failure");
 
     int status = 0;
     /* The child may take a moment to be reaped; give it up to 1s. */

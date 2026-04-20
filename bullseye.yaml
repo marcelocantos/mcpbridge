@@ -1,3 +1,4 @@
+schema_version: 1
 targets:
   T1:
     name: A generic C wrapper transparently proxies any stdio MCP server with automatic upgrade detection and execution, keeping the agent's MCP session alive across child restarts.
@@ -406,3 +407,132 @@ targets:
     origin: manual
     discovered: 2026-04-11
     achieved: 2026-04-11
+  T2:
+    name: The daemon's brew source backend resolves the brew executable reliably under launchd, where $PATH does not include /opt/homebrew/bin.
+    status: identified
+    value: 5.0
+    cost: 2.0
+    acceptance:
+    - brew-source polls succeed when the daemon is launched by `brew services` (launchd) with no user-customised PATH.
+    - If `brew` cannot be found on PATH, the daemon falls back to common install locations (`/opt/homebrew/bin/brew`, `/usr/local/bin/brew`, `/home/linuxbrew/.linuxbrew/bin/brew`) or honours an explicit `brew_path` config knob.
+    - A regression test (or at minimum a targeted unit test on the brew backend's resolver) covers the fallback path with PATH cleared.
+    context: 'When mcpbridge-daemon is launched by `brew services` on macOS, launchd''s default $PATH is /usr/bin:/bin:/usr/sbin:/sbin — it does not include /opt/homebrew/bin. Every scheduled brew-source poll currently fails with `brew outdated: exec: "brew": executable file not found in $PATH`. This silently disables the entire auto-upgrade path for brew-backed configs — the very thing the daemon exists for. On this machine the scheduler has been logging these warnings every 30 minutes since the first install, with no user-visible symptom other than "upgrades never happen." Reproduction: `brew services start mcpbridge`, drop any brew-source config (e.g. `marcelocantos/tap/mnemo`), tail `$(brew --prefix)/var/log/mcpbridge-daemon.log`. Discovered while wrapping mnemo/sawmill/doit/vellum on 2026-04-18.'
+    tags:
+    - bug
+    - daemon
+    - brew
+    origin: discovered while wrapping user's MCP servers on 2026-04-18
+    discovered: 2026-04-18
+  T3:
+    name: The wrapper supports HTTP MCP backends in addition to stdio, while the agent-facing front end remains stdio-only.
+    status: identified
+    value: 13.0
+    cost: 8.0
+    observable: true
+    acceptance:
+    - 'A new `transport_http.{c,h}` implements the `struct transport_ops` vtable against an MCP Streamable HTTP endpoint: HTTP/1.1 POST for client→server, SSE for server→client, single URL.'
+    - 'Scope for v1: plain `http://` to localhost only; https/TLS and remote URLs are explicitly deferred to a follow-on target.'
+    - '`main.c` accepts a `--url URL` flag that selects the HTTP backend; the existing `-- COMMAND [ARGS]` path continues to select the stdio backend. Both shapes route through the same FSM + dispatch with no forks in the event loop.'
+    - 'Reload cycle works end-to-end for an HTTP backend: on daemon RELOAD the wrapper re-dials the URL after a bounded grace window, replays the cached `initialize`, drains queued outgoing requests, and emits `reload_ack` — all invisible to the upstream agent.'
+    - mnemo (HTTP-only as of v0.20.0) can be wrapped with `mcpbridge --url http://localhost:19419/mcp --config mnemo` and survives a `brew services restart mnemo` with no agent-visible disconnect.
+    - A new e2e test (similar to the existing stdio e2e) exercises the wrapper against a fake HTTP MCP server across a daemon-driven reload.
+    - 'Docs updated: README, agents-guide.md, and packaging.md cover both stdio and HTTP backend configurations.'
+    - 'The transparency invariant is preserved: the wrapped HTTP server requires no modification and has no way to detect it is being proxied.'
+    context: mcpbridge v0.2.0 ships stdio-only — the transport vtable was designed to accommodate HTTP, but only `transport_stdio.{c,h}` was implemented, and `main.c` carries the comment "stdio transport only (HTTP is a later target)". This target finally lands HTTP as a second backend transport while keeping the front end stdio-only, preserving the zero-change-to-clients guarantee. The motivating case is mnemo v0.20.0, which collapsed to an HTTP-only MCP daemon (🎯T27 in that repo, 2026-04-18) and currently cannot be wrapped by mcpbridge at all. Filed after a design discussion that confirmed option-2 (grow mcpbridge's transport set) is consistent with the transparency invariant — unlike option-1 (ask mnemo to add a stdio proxy mode), which would have required the MCP server to change.
+    depends_on:
+    - T3.1
+    - T3.2
+    - T3.3
+    - T3.4
+    tags:
+    - wrapper
+    - transport
+    - http
+    origin: discovered during 2026-04-18 discussion about wrapping mnemo v0.20.0
+    discovered: 2026-04-19
+  T3.1:
+    name: The transport vtable is message-oriented (read_frame / write_frame), and the stdio transport is migrated to it with no behavioural change.
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    observable: true
+    actual_cost: 2.0
+    acceptance:
+    - '`struct transport_ops` in `wrapper/src/transport.h` exposes message-oriented operations (e.g. `read_frame`, `write_frame`, or equivalent pull/push primitives) in place of the current `read_fd` / `write_fd` pair. The vtable no longer assumes the transport is backed by file descriptors.'
+    - '`transport_stdio.{c,h}` is updated to implement the new vtable while still using pipes internally; behaviour observable to `dispatch.c` and `main.c` is unchanged.'
+    - '`dispatch.c`, `main.c`, and the event loop are updated to drive the transport through frame-level operations; no code outside `transport_stdio.c` reaches for raw fds of the child process.'
+    - '`make test` in `wrapper/` passes with no test changes beyond those needed to match the new vtable, and the existing stdio e2e smoke test still runs green.'
+    - No HTTP code is introduced by this target; this is a pure refactor that lands standalone.
+    context: 'First sub-target of 🎯T3. Pure refactor: no new transport, no new flags, no behaviour change. Converts the fd-style vtable to message-oriented so a future HTTP transport can plug in without fighting the abstraction. Landing this first means the HTTP work (T3.2) has a stable, tested surface to target, and keeps the change footprint small per PR. User preference (2026-04-18 design discussion): vtable should be message-oriented rather than keeping the fd shape and hiding HTTP write-path complexity behind an internal pipe.'
+    tags:
+    - wrapper
+    - transport
+    - refactor
+    origin: manual
+    discovered: 2026-04-19
+    achieved: 2026-04-20
+  T3.2:
+    name: '`transport_http.{c,h}` implements the message-oriented transport vtable over MCP Streamable HTTP (POST + SSE) against plain `http://localhost` URLs.'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - 'New `wrapper/src/transport_http.{c,h}` implements the message-oriented `struct transport_ops` from T3.1 against an MCP Streamable HTTP endpoint: HTTP/1.1 POST for client→server JSON-RPC, SSE (`text/event-stream`) for server→client messages, single URL for both directions.'
+    - 'Scope cap for v1: plain `http://` to localhost only. `https://` URLs and non-localhost hosts are rejected at construction time with a descriptive error. TLS and remote URLs are explicitly deferred to a later target.'
+    - Implementation uses only vendored C (no libcurl, no external HTTPS stack). An HTTP/1.1 parser sufficient for this single use case is either vendored or hand-written and unit-tested.
+    - 'Unit tests stand up a fake HTTP MCP server (e.g. via a minimal in-process listener) and exercise: initialize round-trip, tools/list round-trip, notification delivery over SSE, connection drop + reconnect.'
+    - The transport is not yet wired into `main.c` — this target only lands the implementation and its tests. Integration (the `--url` flag and reload cycle) comes in T3.3.
+    - '`make test` in `wrapper/` passes with the new `transport_http_test` binary included.'
+    context: 'Second sub-target of 🎯T3. Depends on T3.1 (needs the message-oriented vtable). Introduces the HTTP transport as a standalone module with its own tests, deliberately not yet hooked into the event loop. This separation keeps the change surface small and allows the transport to be iterated on without affecting the stdio path. Transparency invariant (see architecture_transparency memory): the wrapped HTTP server requires no modification and has no way to detect it is being proxied.'
+    depends_on:
+    - T3.1
+    tags:
+    - wrapper
+    - transport
+    - http
+    origin: manual
+    discovered: 2026-04-19
+  T3.3:
+    name: '`main.c` accepts `--url URL` selecting the HTTP backend, and the reload cycle (re-dial + cached-initialize replay) works end-to-end against a live HTTP MCP daemon.'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - '`main.c` accepts `--url URL` as a new flag. When present, the wrapper constructs a `transport_http` (from T3.2) instead of `transport_stdio`; the existing `-- COMMAND [ARGS]` path is untouched and continues to select stdio.'
+    - '`--url` and `--` are mutually exclusive; mixing them is rejected at argv parse time with a descriptive error.'
+    - 'The FSM + dispatch path works unchanged against the HTTP backend: `initialize` handshake, tools/list forwarding, in-flight request tracking, and drain-on-reload all behave identically to the stdio case from the upstream agent''s perspective.'
+    - On daemon-broadcast RELOAD, the wrapper closes the HTTP transport, waits a bounded grace window (for the backend daemon to restart), re-dials the URL, replays the cached `initialize`, drains any queued outgoing requests, and emits `reload_ack` — all invisible to the upstream agent.
+    - 'A new e2e test exercises the wrapper against a fake HTTP MCP server across a daemon-driven reload: simulated restart, re-dial, replay, drain, ack. Test lives alongside the existing stdio e2e.'
+    - 'Manual verification step: `mcpbridge --url http://localhost:19419/mcp --config mnemo` wraps a live mnemo v0.20.0 and survives `brew services restart mnemo` with no agent-visible disconnect; audit-log captures the verification commit hash.'
+    context: Third sub-target of 🎯T3. Wires the HTTP transport (T3.2) into the event loop and proves the reload cycle works end-to-end. This is the target that actually delivers "mnemo can be wrapped" as a user-visible capability. Docs (T3.4) follow.
+    depends_on:
+    - T3.2
+    tags:
+    - wrapper
+    - transport
+    - http
+    - reload
+    origin: manual
+    discovered: 2026-04-19
+  T3.4:
+    name: README, agents-guide.md, and packaging.md cover both stdio and HTTP backend configurations, with a worked mnemo example for the HTTP path.
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - README.md describes both backend shapes (stdio child vs. HTTP endpoint), states the front-end-is-always-stdio constraint, and links to the config-schema reference.
+    - 'agents-guide.md''s install walkthrough covers the HTTP case: `mcpbridge --url http://localhost:19419/mcp --config <name>` as an alternative to `mcpbridge -- <command>`, including when to pick which.'
+    - packaging.md (or equivalent) includes a worked mnemo example showing the full Claude Code config entry for an HTTP-backed wrap, and a troubleshooting note about the `--url` / `--` mutual-exclusion rule.
+    - 'Docs explicitly restate the transparency invariant for the HTTP path: the wrapped HTTP server requires no modification and has no way to detect it is being proxied.'
+    - The v1 scope cap (plain `http://` to localhost only) is documented, with a forward pointer to the future TLS/remote target.
+    context: 'Final sub-target of 🎯T3. Docs cannot land ahead of T3.3 because they would claim behaviour that does not yet exist. Including the worked mnemo example here is deliberate: mnemo is the motivating use case for the HTTP path, and the example doubles as post-release verification bait.'
+    depends_on:
+    - T3.3
+    tags:
+    - docs
+    - http
+    origin: manual
+    discovered: 2026-04-19

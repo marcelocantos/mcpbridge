@@ -4,6 +4,7 @@
 #include "transport_stdio.h"
 
 #include "log.h"
+#include "mcp.h"
 #include "util.h"
 
 #include <errno.h>
@@ -19,9 +20,11 @@
 struct stdio_self {
     const char       *cmd;
     char *const      *argv;
-    pid_t             pid;        /* -1 if not started or already reaped */
-    int               stdin_fd;   /* parent-side write end of child's stdin */
-    int               stdout_fd;  /* parent-side read  end of child's stdout */
+    pid_t             pid;         /* -1 if not started or already reaped */
+    int               stdin_fd;    /* parent-side write end of child's stdin */
+    int               stdout_fd;   /* parent-side read  end of child's stdout */
+    int               reader_live; /* 1 when `reader` is initialised */
+    struct mcp_reader reader;      /* framing buffer for pump() */
 };
 
 /* ---------- fd plumbing helpers ---------- */
@@ -59,6 +62,15 @@ static void close_fd(int *fd) {
         close(*fd);
         *fd = -1;
     }
+}
+
+static void reader_reset(struct stdio_self *s) {
+    if (s->reader_live) {
+        mcp_reader_free(&s->reader);
+        s->reader_live = 0;
+    }
+    mcp_reader_init(&s->reader, 0);
+    s->reader_live = 1;
 }
 
 /* ---------- vtable ---------- */
@@ -134,6 +146,11 @@ static int stdio_start(void *vself) {
     s->stdin_fd  = in_pipe[1];
     s->stdout_fd = out_pipe[0];
     s->pid       = pid;
+
+    /* Fresh framing buffer for this child. A previous stop() may
+     * have left a reader behind holding partial bytes from the old
+     * child; those are meaningless against a new child. */
+    reader_reset(s);
 
     log_debug("stdio_start: spawned %s (pid %d)", s->cmd, (int)pid);
     return 0;
@@ -212,40 +229,81 @@ done:
     return 0;
 }
 
-static int stdio_read_fd(void *vself) {
+static int stdio_poll_fd(void *vself) {
     struct stdio_self *s = vself;
     return s->stdout_fd;
 }
 
-static int stdio_write_fd(void *vself) {
-    struct stdio_self *s = vself;
-    return s->stdin_fd;
-}
-
-static ssize_t stdio_read(void *vself, void *buf, size_t n) {
+static int stdio_pump(void *vself,
+                      transport_on_message on_msg, void *ctx) {
     struct stdio_self *s = vself;
     if (s->stdout_fd < 0) {
         errno = EBADF;
         return -1;
     }
+    if (!s->reader_live) {
+        reader_reset(s);
+    }
+
+    char buf[8192];
     ssize_t r;
     do {
-        r = read(s->stdout_fd, buf, n);
+        r = read(s->stdout_fd, buf, sizeof(buf));
     } while (r == -1 && errno == EINTR);
-    return r;
+
+    if (r == 0) {
+        return 1; /* EOF */
+    }
+    if (r < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 0;
+        }
+        log_error("stdio_pump: read(fd=%d): %s",
+                  s->stdout_fd, strerror(errno));
+        return -1;
+    }
+
+    mcp_reader_feed(&s->reader, buf, (size_t)r);
+
+    for (;;) {
+        const char *line = NULL;
+        size_t      len  = 0;
+        int rc = mcp_reader_pop(&s->reader, &line, &len);
+        if (rc == MCP_READER_EMPTY) {
+            return 0;
+        }
+        if (rc == MCP_READER_TOO_LONG) {
+            log_warn("stdio_pump: dropped oversized line");
+            continue;
+        }
+        if (on_msg != NULL) {
+            on_msg(ctx, line, len);
+        }
+    }
 }
 
-static ssize_t stdio_write(void *vself, const void *buf, size_t n) {
+static int stdio_send(void *vself, const void *bytes, size_t n) {
     struct stdio_self *s = vself;
     if (s->stdin_fd < 0) {
         errno = EBADF;
         return -1;
     }
-    ssize_t r;
-    do {
-        r = write(s->stdin_fd, buf, n);
-    } while (r == -1 && errno == EINTR);
-    return r;
+    const char *p = bytes;
+    size_t left = n;
+    while (left > 0) {
+        ssize_t w = write(s->stdin_fd, p, left);
+        if (w > 0) {
+            p    += (size_t)w;
+            left -= (size_t)w;
+            continue;
+        }
+        if (w == -1 && errno == EINTR) {
+            continue;
+        }
+        log_error("stdio_send: write: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 static void stdio_destroy(void *vself) {
@@ -256,16 +314,19 @@ static void stdio_destroy(void *vself) {
     /* stop is idempotent; calling it here ensures we never leak an
      * unreaped child if the caller forgot to stop first. */
     stdio_stop(s);
+    if (s->reader_live) {
+        mcp_reader_free(&s->reader);
+        s->reader_live = 0;
+    }
     free(s);
 }
 
 static const struct transport_ops stdio_ops = {
     .start    = stdio_start,
     .stop     = stdio_stop,
-    .read_fd  = stdio_read_fd,
-    .write_fd = stdio_write_fd,
-    .read     = stdio_read,
-    .write    = stdio_write,
+    .poll_fd  = stdio_poll_fd,
+    .pump     = stdio_pump,
+    .send     = stdio_send,
     .destroy  = stdio_destroy,
 };
 
@@ -277,11 +338,12 @@ struct transport *transport_stdio_new(const char *cmd, char *const argv[]) {
         return NULL;
     }
     struct stdio_self *s = xcalloc(1, sizeof(*s));
-    s->cmd       = cmd;
-    s->argv      = argv;
-    s->pid       = -1;
-    s->stdin_fd  = -1;
-    s->stdout_fd = -1;
+    s->cmd         = cmd;
+    s->argv        = argv;
+    s->pid         = -1;
+    s->stdin_fd    = -1;
+    s->stdout_fd   = -1;
+    s->reader_live = 0;
 
     struct transport *t = xcalloc(1, sizeof(*t));
     t->ops  = &stdio_ops;

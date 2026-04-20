@@ -216,12 +216,7 @@ static void sink_send_upstream(void *ctx, const void *bytes, size_t n) {
 
 static void sink_send_child(void *ctx, const void *bytes, size_t n) {
     struct loop_ctx *c = ctx;
-    int fd = transport_write_fd(c->transport);
-    if (fd < 0) {
-        log_warn("sink_send_child: no child write fd");
-        return;
-    }
-    if (write_all(fd, bytes, n, "child") != 0) {
+    if (transport_send(c->transport, bytes, n) != 0) {
         c->exit_requested = 1;
     }
 }
@@ -455,13 +450,28 @@ static void drain_reader(struct mcp_reader *reader,
     }
 }
 
+/* transport_on_message adapter: parse one framed line from the
+ * child-side transport and hand the resulting mcp_msg to dispatch.
+ * The transport has already done framing (line-splitting for stdio,
+ * SSE event extraction for http) so this callback only sees complete
+ * JSON-RPC envelopes. */
+static void child_on_message(void *vctx, const char *line, size_t len) {
+    struct loop_ctx *c = vctx;
+    struct mcp_msg m = {0};
+    int pr = mcp_msg_parse(line, len, &m);
+    if (pr != MCP_PARSE_OK) {
+        log_warn("child: parse error %d on %zu-byte line", pr, len);
+        return;
+    }
+    dispatch_on_child(c->dispatch, &m);
+    mcp_msg_free(&m);
+}
+
 /* ---------- The loop ---------- */
 
 static int run_loop(struct loop_ctx *ctx) {
-    struct mcp_reader up_reader    = {0};
-    struct mcp_reader child_reader = {0};
+    struct mcp_reader up_reader = {0};
     mcp_reader_init(&up_reader, 0);
-    mcp_reader_init(&child_reader, 0);
 
     int rc = 0;
 
@@ -507,7 +517,7 @@ static int run_loop(struct loop_ctx *ctx) {
             }
         }
 
-        int child_fd = transport_read_fd(ctx->transport);
+        int child_fd = transport_poll_fd(ctx->transport);
         int daemon_fd = ctx->daemon != NULL
             ? daemon_client_fd(ctx->daemon) : -1;
 
@@ -559,10 +569,14 @@ static int run_loop(struct loop_ctx *ctx) {
                          dispatch_on_upstream, "upstream");
         }
 
-        /* Child stdout. */
+        /* Child side: pump lets the transport do whatever framing its
+         * medium requires (line splitting for stdio, SSE parsing for
+         * http) and invokes child_on_message per complete MCP message.
+         * Framing buffers live inside the transport, so swaps reset
+         * automatically on transport_stop + transport_start. */
         if (idx_child >= 0 &&
             (pfds[idx_child].revents & (POLLIN | POLLHUP | POLLERR))) {
-            int p = pump_read(child_fd, &child_reader);
+            int p = transport_pump(ctx->transport, child_on_message, ctx);
             if (p == 1) {
                 log_info("child closed stdout");
                 sink_emit_event(ctx, FSM_EV_CHILD_EXIT);
@@ -575,15 +589,9 @@ static int run_loop(struct loop_ctx *ctx) {
                 if (ctx->fsm->state != FSM_SWAPPING) {
                     break;
                 }
-                /* Reset the child reader: any pending bytes belong
-                 * to the old child and make no sense for the new one. */
-                mcp_reader_free(&child_reader);
-                mcp_reader_init(&child_reader, 0);
                 continue;
             }
             if (p < 0) { rc = 1; break; }
-            drain_reader(&child_reader, ctx->dispatch,
-                         dispatch_on_child, "child");
         }
 
         /* Daemon fd. */
@@ -608,7 +616,6 @@ static int run_loop(struct loop_ctx *ctx) {
     }
 
     mcp_reader_free(&up_reader);
-    mcp_reader_free(&child_reader);
     return rc;
 }
 
