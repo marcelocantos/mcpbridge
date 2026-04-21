@@ -5,9 +5,13 @@ Keep your MCP server sessions alive across upgrades.
 mcpbridge is split into two processes:
 
 - **`mcpbridge`** (C) — a tiny wrapper that your MCP client launches in
-  place of the real MCP server. It spawns the real server as a child,
-  speaks MCP transparently to the upstream agent, and cycles the child
-  when told to — without interrupting the session.
+  place of the real MCP server. It speaks MCP transparently to the
+  upstream agent on stdio, and reaches the wrapped server through
+  whichever backend it was told to use — either spawning a child
+  process (stdio backend, via `-- COMMAND [ARGS...]`) or connecting
+  to a localhost MCP Streamable HTTP endpoint (HTTP backend, via
+  `--url http://localhost:PORT/path`). It cycles the backend when
+  told to, without interrupting the agent's session.
 - **`mcpbridge-daemon`** (Go) — one long-lived process per user session,
   typically run under `brew services`. It reads per-server config files,
   polls upgrade sources (Homebrew formulas, GitHub releases), performs
@@ -15,7 +19,8 @@ mcpbridge is split into two processes:
 
 The two processes talk over a Unix domain socket. When the daemon isn't
 running, the wrapper still works — it just runs as a pure bridge with
-no upgrade handling.
+no upgrade handling. The wrapped MCP server, regardless of backend,
+requires no modification and cannot tell it is being proxied.
 
 ## Why two languages?
 
@@ -56,7 +61,9 @@ Prefer to have your agent do it? Give it this prompt:
 Install mcpbridge from https://github.com/marcelocantos/mcpbridge:
 brew install, start the service, drop a config in
 ~/.config/mcpbridge/, update the MCP client config to wrap each
-server with `mcpbridge -- ...`, and restart the session. Follow
+server — either `mcpbridge -- <original command>` for a stdio
+server or `mcpbridge --url http://localhost:PORT/path --config
+NAME` for an HTTP MCP daemon — and restart the session. Follow
 agents-guide.md in the repo — installation is a four-step process
 and is not complete until the client has been restarted.
 ```
@@ -66,7 +73,7 @@ If you use an agentic coding tool, include
 
 ## Status
 
-Work in progress. See `docs/targets.yaml` for the roadmap.
+Work in progress. See `bullseye.yaml` for the roadmap.
 
 ## Build from source
 

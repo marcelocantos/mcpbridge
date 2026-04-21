@@ -84,9 +84,12 @@ brew services restart mcpbridge
 
 ## 4. Point your MCP client at mcpbridge
 
-In your MCP client config (Claude Code: `~/.claude/mcp.json` or
+In your MCP client config (Claude Code: `~/.claude.json` or the
 project-level equivalent), replace each MCP server command with a
-call to `mcpbridge` that wraps the original command:
+call to `mcpbridge`. Two backend forms are supported; pick the
+one that matches how the wrapped server runs.
+
+**Stdio backend (spawn a child — the common case):**
 
 ```json
 {
@@ -107,12 +110,38 @@ after the command, e.g.:
 "args": ["--", "mcp-foo", "--some-flag", "value"]
 ```
 
-Restart your MCP client. mcpbridge spawns `mnemo`, bridges stdio,
-and registers with the daemon. From now on, whenever the daemon
-notices a new version (either via its poll or because you ran
-`brew upgrade mnemo` yourself), it pushes a reload notification,
-mcpbridge cycles the child transparently, and your agent's MCP
-session continues without reconnecting.
+**HTTP backend (connect to a localhost MCP Streamable HTTP
+endpoint, for servers that run as standalone daemons — mnemo as
+of v0.20.0 is one):**
+
+```json
+{
+  "mcpServers": {
+    "mnemo": {
+      "command": "/opt/homebrew/bin/mcpbridge",
+      "args": [
+        "--url", "http://localhost:19419/mcp",
+        "--config", "mnemo"
+      ]
+    }
+  }
+}
+```
+
+v1 restrictions on `--url`:
+- Plain `http://` only; `https://` is rejected.
+- Host must be `localhost`, `127.0.0.1`, or `::1`.
+- `--config NAME` is required.
+- `--url` and `-- COMMAND` are mutually exclusive.
+
+Restart your MCP client. For stdio, mcpbridge fork/execs the child
+and bridges stdio; for HTTP, it POSTs to the URL and streams
+responses back. Either way, the wrapped server requires no
+modification and cannot tell it is being proxied. From then on,
+whenever the daemon notices a new version (either via its poll or
+because you ran `brew upgrade` yourself), it pushes a reload
+notification, mcpbridge cycles the backend transparently, and
+your agent's MCP session continues without reconnecting.
 
 ## Troubleshooting
 

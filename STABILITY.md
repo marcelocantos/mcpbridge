@@ -27,8 +27,9 @@ Flags — each entry shows default if any and current stability:
 
 | Flag | Arg | Default | Stability |
 |---|---|---|---|
-| `-- COMMAND [ARGS...]` | argv tail | required | **stable** — tail-argv convention is non-negotiable for an MCP-client launched binary |
-| `--config NAME` | string | `basename(argv[1])` | **needs review** — is tail-derived default good enough for `npx`/`uvx`/`python -m`? |
+| `-- COMMAND [ARGS...]` | argv tail | one of `--` or `--url` is required | **stable** — tail-argv convention is non-negotiable for an MCP-client launched binary |
+| `--url URL` | string | — | **stable** — plain `http://` loopback URLs only in v1; https + remote hosts are rejected. Mutually exclusive with `-- COMMAND`. |
+| `--config NAME` | string | `basename(argv[1])` (stdio only; required for `--url`) | **needs review** — is tail-derived default good enough for `npx`/`uvx`/`python -m`? |
 | `--socket PATH` | string | `resolve_daemon_socket_path()` | **stable** |
 | `-v`, `--verbose` | — | off | **stable** |
 | `--version` | — | — | **stable** |
@@ -233,10 +234,15 @@ These must be addressed before the v1.0.0 release can ship.
      cached and new `tools/list` match byte-for-byte. Not
      urgent; the waste is a single refetch per reload.
 
-4. **No HTTP transport in the wrapper.** Only stdio children are
-   supported. The original plan included localhost HTTP MCP
-   servers (plain HTTP, no TLS). This is tracked but not blocking
-   1.0 — adding HTTP after 1.0 is additive.
+4. **HTTP backend scope is loopback + plain HTTP only.** The
+   wrapper supports both stdio and HTTP backends (🎯T3, landed
+   post-v0.2.0). The HTTP path accepts only plain `http://` to
+   loopback hosts (`localhost` / `127.0.0.1` / `::1`); `https://`
+   and remote hosts are rejected at launch. There is no standing
+   GET SSE stream — inbound notifications arrive via POST-response
+   SSE streams. Widening any of these (TLS, remote hosts, standing
+   GET SSE) is additive and can land post-1.0 without breaking
+   existing users.
 
 5. **No GitHub release publishing automation beyond what's
    shipped.** The Homebrew formula publishing is automated via
@@ -259,9 +265,9 @@ These must be addressed before the v1.0.0 release can ship.
   current code. Flagging here only to note that we explicitly
   do not intend to stand up our own TLS stack.
 - **Remote HTTP MCP servers over TLS from the wrapper.** The
-  wrapper is stdio-only. HTTP support, if it ever arrives, is
-  plain-HTTP localhost only. Remote HTTPS wrapping is a different
-  product.
+  HTTP backend is plain-HTTP loopback only. TLS and remote hosts
+  are out of scope for 1.0; wrapping a remote MCP server over
+  HTTPS is a different product.
 - **Windows.** macOS and Linux only.
 - **`npm` / `pypi` / `go install` source backends.** Deferred
   indefinitely. The `brew` + `github` backends cover everything

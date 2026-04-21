@@ -7,13 +7,17 @@
  * daemon client into a runnable binary.
  *
  * Integration scope:
- *   - stdio transport only (HTTP is a later target)
+ *   - Two backend transports: stdio (fork/exec a child) and http
+ *     (localhost MCP Streamable HTTP). Selected via `-- COMMAND` or
+ *     `--url URL` respectively; mutually exclusive.
  *   - Daemon connection is best-effort: if the daemon is absent the
  *     wrapper still works as a transparent proxy and periodically
  *     tries to reconnect in the background with 1s -> 5s backoff.
  *   - RELOAD notifications from the daemon drive the full
- *     DRAINING -> SWAPPING -> child respawn -> cached-initialize
- *     replay -> RUNNING -> reload_ack cycle.
+ *     DRAINING -> SWAPPING -> backend cycle -> cached-initialize
+ *     replay -> RUNNING -> reload_ack cycle. For stdio, "backend
+ *     cycle" is a child respawn; for http, it is session-id reset
+ *     + re-dial on the next POST.
  *   - Shutdown is clean on upstream EOF, SIGINT, SIGTERM, or an FSM
  *     FAILED transition. */
 
@@ -70,16 +74,31 @@ static const char usage_text[] =
 static const char agent_help_text[] =
     "mcpbridge " MCPBRIDGE_VERSION "\n"
     "\n"
-    "Wraps any stdio MCP server transparently. In your MCP client\n"
-    "config, replace the command with 'mcpbridge' and prefix the\n"
-    "original command with '--':\n"
+    "Transparently wraps an MCP server. The agent always talks to\n"
+    "mcpbridge over stdio; the backend the wrapped server lives on\n"
+    "can be either stdio (a child process) or HTTP (a localhost\n"
+    "MCP Streamable HTTP endpoint).\n"
+    "\n"
+    "Stdio backend — spawn a child:\n"
     "\n"
     "  { \"command\": \"mcpbridge\",\n"
     "    \"args\": [\"--\", \"real-mcp-server\", \"--some-flag\"] }\n"
     "\n"
-    "mcpbridge forks the wrapped server, bridges stdio, and cycles\n"
-    "the child when mcpbridge-daemon tells it a newer version is\n"
-    "installed — invisibly to the agent's MCP session.\n";
+    "HTTP backend — connect to a localhost URL:\n"
+    "\n"
+    "  { \"command\": \"mcpbridge\",\n"
+    "    \"args\": [\"--url\", \"http://localhost:19419/mcp\",\n"
+    "             \"--config\", \"real-mcp-server\"] }\n"
+    "\n"
+    "For HTTP, v1 accepts plain http:// to localhost / 127.0.0.1 /\n"
+    "::1 only. https and remote hosts are rejected; --config NAME is\n"
+    "required because there is no child command to derive a default\n"
+    "from.\n"
+    "\n"
+    "Either way, mcpbridge bridges the session and cycles the backend\n"
+    "when mcpbridge-daemon tells it a newer version is installed —\n"
+    "invisibly to the agent's MCP session. The wrapped server is not\n"
+    "aware of mcpbridge and requires no modification.\n";
 
 /* ---------- Signal handling ---------- */
 

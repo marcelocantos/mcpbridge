@@ -425,10 +425,11 @@ targets:
     discovered: 2026-04-18
   T3:
     name: The wrapper supports HTTP MCP backends in addition to stdio, while the agent-facing front end remains stdio-only.
-    status: identified
+    status: achieved
     value: 13.0
     cost: 8.0
     observable: true
+    actual_cost: 13.0
     acceptance:
     - 'A new `transport_http.{c,h}` implements the `struct transport_ops` vtable against an MCP Streamable HTTP endpoint: HTTP/1.1 POST for client→server, SSE for server→client, single URL.'
     - 'Scope for v1: plain `http://` to localhost only; https/TLS and remote URLs are explicitly deferred to a follow-on target.'
@@ -450,6 +451,7 @@ targets:
     - http
     origin: discovered during 2026-04-18 discussion about wrapping mnemo v0.20.0
     discovered: 2026-04-19
+    achieved: 2026-04-21
   T3.1:
     name: The transport vtable is message-oriented (read_frame / write_frame), and the stdio transport is migrated to it with no behavioural change.
     status: achieved
@@ -527,10 +529,11 @@ targets:
     achieved: 2026-04-21
   T3.4:
     name: README, agents-guide.md, and packaging.md cover both stdio and HTTP backend configurations, with a worked mnemo example for the HTTP path.
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
+    actual_cost: 2.0
     acceptance:
     - README.md describes both backend shapes (stdio child vs. HTTP endpoint), states the front-end-is-always-stdio constraint, and links to the config-schema reference.
     - 'agents-guide.md''s install walkthrough covers the HTTP case: `mcpbridge --url http://localhost:19419/mcp --config <name>` as an alternative to `mcpbridge -- <command>`, including when to pick which.'
@@ -545,3 +548,4 @@ targets:
     - http
     origin: manual
     discovered: 2026-04-19
+    achieved: 2026-04-21

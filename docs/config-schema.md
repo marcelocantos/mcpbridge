@@ -31,7 +31,7 @@ The filename is a convention, not a requirement — the daemon reads
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `schema` | int | yes | — | Config schema version. Must be `1` for this daemon. |
-| `name` | string | yes | — | Config name. Must match what the wrapper registers as (derived from `basename(argv[1])` unless the wrapper was passed `--config NAME`). |
+| `name` | string | yes | — | Config name. Must match what the wrapper registers as. For the stdio backend the default is `basename(argv[1])` (the wrapped command); for the HTTP backend (`--url`) no default is available and `--config NAME` must be passed explicitly. Either way, `--config NAME` on the command line overrides the default. |
 | `source` | object | yes | — | Upgrade source backend — see [Sources](#sources). |
 | `upgrade` | enum | no | `notify` | One of `off`, `notify`, `auto`. See [Upgrade modes](#upgrade-modes). |
 | `check_interval` | duration | no | `1h` | How often to poll the source. Accepts Go duration strings (`30m`, `1h`, `6h`). |

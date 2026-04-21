@@ -12,21 +12,35 @@ solves one specific problem: upgrading a wrapped MCP server
 normally kills the agent's session, forcing a reconnect and
 losing whatever ephemeral state the agent was building up (open
 handles, cached initialize state, in-flight tool calls). With
-mcpbridge in front, an upgrade becomes a seamless child-process
-swap that the agent never observes.
+mcpbridge in front, an upgrade becomes a seamless backend cycle
+that the agent never observes.
+
+The wrapped server can live on either transport:
+
+- **stdio**: the common case. mcpbridge fork/execs the server as
+  a child and bridges stdin/stdout.
+- **http**: a localhost MCP Streamable HTTP endpoint (plain
+  `http://localhost:PORT/path`). mcpbridge POSTs to it on behalf
+  of the agent and streams responses back. Used for servers that
+  are already long-running daemons themselves (e.g. mnemo).
+
+The agent always talks to mcpbridge on stdio regardless of which
+backend is in use. In both cases the wrapped server requires no
+modification and cannot tell it is being proxied.
 
 It's split into two processes:
 
 - **`mcpbridge`** (C) — a tiny per-server wrapper that the MCP
   client launches in place of the real server. It speaks MCP to
-  the agent on stdio, spawns the real server as a child, bridges
-  every message, and cycles the child when the daemon tells it
-  to. Per session, lives and dies with the MCP client.
+  the agent on stdio, talks to the backend on either stdio or
+  http, bridges every message, and cycles the backend when the
+  daemon tells it to. Per session, lives and dies with the MCP
+  client.
 - **`mcpbridge-daemon`** (Go) — one long-lived process per user
   session, typically run under `brew services`. Reads per-server
   JSON config files, polls upgrade sources (Homebrew formulas,
   GitHub releases), performs upgrades, and tells connected
-  wrappers when to cycle their children.
+  wrappers when to cycle their backends.
 
 They talk over a user-local Unix domain socket. When the daemon
 isn't running, the wrapper still works — it just runs as a pure
@@ -114,8 +128,11 @@ brew services restart mcpbridge
 ### 4. Point your MCP client at mcpbridge
 
 Replace each MCP server entry in your client config with a call
-to `mcpbridge` that wraps the original command. For Claude Code,
-edit `~/.claude.json` or the project-local equivalent:
+to `mcpbridge`. There are two forms, depending on how the wrapped
+server runs.
+
+**Stdio backend (spawn a child).** Pass the original command and
+its arguments after `--`:
 
 ```json
 {
@@ -135,6 +152,30 @@ as the child's argv:
 ```json
 "args": ["--", "mcp-foo", "--config", "/etc/foo.conf"]
 ```
+
+**HTTP backend (connect to a localhost URL).** Pass `--url` and
+`--config`:
+
+```json
+{
+  "mcpServers": {
+    "mnemo": {
+      "command": "/opt/homebrew/bin/mcpbridge",
+      "args": [
+        "--url", "http://localhost:19419/mcp",
+        "--config", "mnemo"
+      ]
+    }
+  }
+}
+```
+
+v1 restrictions on `--url`:
+- Plain `http://` only. `https://` and remote hosts are rejected.
+- Host must be `localhost`, `127.0.0.1`, or `::1`.
+- `--config NAME` is required (no child command to derive a
+  default from).
+- `--url` and `-- COMMAND` are mutually exclusive.
 
 **Restart the MCP client** so it picks up the new launch command.
 Until you do this, the MCP client is still spawning the old direct
@@ -187,8 +228,9 @@ Install mcpbridge from https://github.com/marcelocantos/mcpbridge:
   3. Drop `~/.config/mcpbridge/mnemo.json` (or whichever server)
      per the schema in docs/config-schema.md
   4. Edit the MCP client config so each wrapped server's command
-     becomes `mcpbridge -- <original command>` — then restart the
-     client.
+     becomes `mcpbridge -- <original command>` (stdio backend) or
+     `mcpbridge --url http://localhost:PORT/path --config NAME`
+     (HTTP backend) — then restart the client.
 
   Installation is NOT complete until step 4 has run and the MCP
   client has been restarted. Verify by calling a tool on the
@@ -204,11 +246,15 @@ Install mcpbridge from https://github.com/marcelocantos/mcpbridge:
 
 ```
 Usage: mcpbridge [OPTIONS] -- COMMAND [ARGS...]
+       mcpbridge --url URL --config NAME [OPTIONS]
 
 Options:
-  --config NAME    config name for daemon registration
-                   (default: basename of COMMAND)
+  --config NAME    config name for daemon registration.
+                   Default for stdio: basename of COMMAND.
+                   Required for --url (no default available).
   --socket PATH    override daemon socket path
+  --url URL        use an HTTP MCP backend instead of spawning a child.
+                   Mutually exclusive with the `-- COMMAND` form.
   -v, --verbose    extra logging to stderr
   --version        print version and exit
   --help           print this help and exit
@@ -218,6 +264,10 @@ Options:
 One `mcpbridge` process is launched per wrapped MCP server by the
 MCP client. It stays alive for the duration of the agent session.
 It is not a daemon and is not started manually.
+
+For `--url`, v1 accepts only plain `http://` to loopback hosts
+(`localhost` / `127.0.0.1` / `::1`). https and remote hosts are
+rejected at launch.
 
 ### `mcpbridge-daemon`
 
@@ -253,8 +303,11 @@ Full reference: `docs/config-schema.md`. Short form:
 }
 ```
 
-- `name` **must** match what the wrapper registers as, which is
-  `basename(argv[1])` unless the wrapper was passed `--config NAME`.
+- `name` **must** match what the wrapper registers as. For stdio,
+  the default is `basename(argv[1])` (the wrapped command); for
+  `--url`, `--config NAME` is required and becomes the registered
+  name directly. Either way, passing `--config NAME` explicitly
+  overrides any default.
 - `upgrade` defaults to `notify` (detect + log, don't install).
   Use `auto` to let the daemon drive the install. `off` disables
   polling for that server.
