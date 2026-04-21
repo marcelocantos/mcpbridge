@@ -409,9 +409,10 @@ targets:
     achieved: 2026-04-11
   T2:
     name: The daemon's brew source backend resolves the brew executable reliably under launchd, where $PATH does not include /opt/homebrew/bin.
-    status: identified
+    status: achieved
     value: 5.0
     cost: 2.0
+    actual_cost: 3.0
     acceptance:
     - brew-source polls succeed when the daemon is launched by `brew services` (launchd) with no user-customised PATH.
     - If `brew` cannot be found on PATH, the daemon falls back to common install locations (`/opt/homebrew/bin/brew`, `/usr/local/bin/brew`, `/home/linuxbrew/.linuxbrew/bin/brew`) or honours an explicit `brew_path` config knob.
@@ -423,6 +424,7 @@ targets:
     - brew
     origin: discovered while wrapping user's MCP servers on 2026-04-18
     discovered: 2026-04-18
+    achieved: 2026-04-22
   T3:
     name: The wrapper supports HTTP MCP backends in addition to stdio, while the agent-facing front end remains stdio-only.
     status: achieved
