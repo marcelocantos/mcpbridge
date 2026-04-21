@@ -23,6 +23,7 @@
 #include "log.h"
 #include "mcp.h"
 #include "transport.h"
+#include "transport_http.h"
 #include "transport_stdio.h"
 #include "util.h"
 
@@ -43,12 +44,24 @@
 
 static const char usage_text[] =
     "Usage: mcpbridge [OPTIONS] -- COMMAND [ARGS...]\n"
+    "       mcpbridge --url URL --config NAME [OPTIONS]\n"
     "\n"
     "Wrap an MCP server and keep its session alive across upgrades.\n"
     "\n"
+    "Two backend forms:\n"
+    "  stdio:  spawn COMMAND [ARGS...] as a child after `--`.\n"
+    "  http:   connect to an MCP Streamable HTTP endpoint via --url.\n"
+    "          URL must be http://host[:port]/path with host one of\n"
+    "          localhost / 127.0.0.1 / ::1. https and remote hosts are\n"
+    "          rejected in v1.\n"
+    "\n"
     "Options:\n"
-    "  --config NAME    config name for daemon registration (default: basename of COMMAND)\n"
+    "  --config NAME    config name for daemon registration.\n"
+    "                   Default for stdio: basename of COMMAND.\n"
+    "                   Required for --url (no default available).\n"
     "  --socket PATH    override daemon socket path\n"
+    "  --url URL        use an HTTP MCP backend instead of spawning a child.\n"
+    "                   Mutually exclusive with the `-- COMMAND` form.\n"
     "  -v, --verbose    extra logging to stderr\n"
     "  --version        print version and exit\n"
     "  --help           print this help and exit\n"
@@ -656,6 +669,7 @@ static const char *default_config_name(const char *cmd) {
 int main(int argc, char **argv) {
     const char *cli_sock   = NULL;
     const char *cli_config = NULL;
+    const char *cli_url    = NULL;
 
     /* Options pass. Stops at the first `--`. */
     for (int i = 1; i < argc; i++) {
@@ -691,6 +705,14 @@ int main(int argc, char **argv) {
             cli_config = argv[++i];
             continue;
         }
+        if (str_eq(argv[i], "--url")) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "mcpbridge: --url requires an argument\n");
+                return 2;
+            }
+            cli_url = argv[++i];
+            continue;
+        }
         if (str_eq(argv[i], "--")) {
             break;
         }
@@ -701,10 +723,26 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Backend selection. Exactly one of `-- COMMAND` or `--url URL`
+     * must be given. */
     const char *cmd = NULL;
     char      **cmd_argv = NULL;
-    if (split_child_argv(argc, argv, &cmd, &cmd_argv) != 0) {
+    int have_cmd = (split_child_argv(argc, argv, &cmd, &cmd_argv) == 0);
+
+    if (cli_url != NULL && have_cmd) {
+        fprintf(stderr,
+                "mcpbridge: --url and `-- COMMAND` are mutually exclusive\n");
         fputs(usage_text, stderr);
+        return 2;
+    }
+    if (cli_url == NULL && !have_cmd) {
+        fputs(usage_text, stderr);
+        return 2;
+    }
+    if (cli_url != NULL && cli_config == NULL) {
+        fprintf(stderr,
+                "mcpbridge: --config NAME is required when using --url "
+                "(no child command to derive a default from)\n");
         return 2;
     }
 
@@ -716,11 +754,25 @@ int main(int argc, char **argv) {
         log_warn("set_nonblock(stdin) failed: %s", strerror(errno));
     }
 
-    struct transport *t = transport_stdio_new(cmd, cmd_argv);
-    if (t == NULL) {
-        log_error("transport_stdio_new failed");
-        return 1;
+    struct transport *t;
+    const char       *child_bin;
+    if (cli_url != NULL) {
+        t = transport_http_new(cli_url);
+        if (t == NULL) {
+            log_error("transport_http_new(%s) failed: %s",
+                      cli_url, strerror(errno));
+            return 1;
+        }
+        child_bin = cli_url;
+    } else {
+        t = transport_stdio_new(cmd, cmd_argv);
+        if (t == NULL) {
+            log_error("transport_stdio_new failed");
+            return 1;
+        }
+        child_bin = cmd;
     }
+
     if (transport_start(t) != 0) {
         log_error("transport_start failed: %s", strerror(errno));
         transport_destroy(t);
@@ -739,7 +791,7 @@ int main(int argc, char **argv) {
                                ? cli_config
                                : default_config_name(cmd),
         .sock_path          = resolve_daemon_socket_path(cli_sock),
-        .child_bin          = cmd,
+        .child_bin          = child_bin,
         .pending_reload_seq = 0,
         .next_reconnect_at  = 0,
         .backoff_ms         = 0,

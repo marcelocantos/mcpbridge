@@ -502,10 +502,11 @@ targets:
     achieved: 2026-04-20
   T3.3:
     name: '`main.c` accepts `--url URL` selecting the HTTP backend, and the reload cycle (re-dial + cached-initialize replay) works end-to-end against a live HTTP MCP daemon.'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
+    actual_cost: 5.0
     acceptance:
     - '`main.c` accepts `--url URL` as a new flag. When present, the wrapper constructs a `transport_http` (from T3.2) instead of `transport_stdio`; the existing `-- COMMAND [ARGS]` path is untouched and continues to select stdio.'
     - '`--url` and `--` are mutually exclusive; mixing them is rejected at argv parse time with a descriptive error.'
@@ -523,6 +524,7 @@ targets:
     - reload
     origin: manual
     discovered: 2026-04-19
+    achieved: 2026-04-21
   T3.4:
     name: README, agents-guide.md, and packaging.md cover both stdio and HTTP backend configurations, with a worked mnemo example for the HTTP path.
     status: identified

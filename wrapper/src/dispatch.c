@@ -45,15 +45,20 @@ static void send_raw_with_newline(const struct dispatch_sink *sink,
                                   const void *bytes, size_t n) {
     /* The parser strips the trailing newline from the raw bytes.
      * When we forward, we need to re-append it so the downstream
-     * framing is correct. We do this in two writes to avoid a
-     * per-message allocation — callers see one logical MCP line. */
+     * framing is correct. We deliver the whole message (bytes +
+     * newline) in a SINGLE sink call — the HTTP backend treats
+     * each send as one complete POST and would otherwise fire a
+     * spurious one-byte POST for the trailing newline. A scratch
+     * copy is cheap; localhost throughput is not the bottleneck. */
+    char *scratch = xmalloc(n + 1);
+    memcpy(scratch, bytes, n);
+    scratch[n] = '\n';
     if (to_child) {
-        sink->send_child(sink->ctx, bytes, n);
-        sink->send_child(sink->ctx, "\n", 1);
+        sink->send_child(sink->ctx, scratch, n + 1);
     } else {
-        sink->send_upstream(sink->ctx, bytes, n);
-        sink->send_upstream(sink->ctx, "\n", 1);
+        sink->send_upstream(sink->ctx, scratch, n + 1);
     }
+    free(scratch);
 }
 
 static void enqueue(struct dispatch *d, const void *bytes, size_t n) {
