@@ -549,3 +549,154 @@ targets:
     origin: manual
     discovered: 2026-04-19
     achieved: 2026-04-21
+  T4:
+    name: The C wrapper is a minimal OS-primitive T-piece driven by daemon instructions; all protocol logic and state interpretation live in the daemon.
+    status: identified
+    value: 20.0
+    cost: 13.0
+    observable: true
+    acceptance:
+    - The C wrapper no longer understands MCP, HTTP, SSE, or chunked-transfer framing. It exposes a small primitive instruction set (run / connect / read / write / stream / close / wait / snapshot / set_state) over the daemon UDS and nothing else.
+    - Total hand-written C shrinks from ~4,500 lines to under 1,000. Vendored cJSON is deleted (wrapper uses a minimal hand-rolled envelope parser OR length-prefixed binary framing — to be decided in 🎯T4.1).
+    - Stdio wraps function end-to-end with the daemon absent after initial startup — once the daemon has issued `run` + two `stream`s, bytes flow through the wrapper without any daemon involvement, and the daemon can be restarted without dropping data.
+    - HTTP wraps are implemented entirely in the daemon using the wrapper's primitives. HTTP requires the daemon in the data path; HTTP mid-request survival of a daemon restart is explicitly out of scope.
+    - 'The daemon is stateless between restarts: on restart it rediscovers all active sessions by accepting reconnects from wrappers and reading back their snapshots + daemon-supplied state blobs. No daemon-side persistent state file.'
+    - Schema migration across daemon versions is entirely the daemon's concern. The wrapper stores the state blob opaquely and never interprets its contents.
+    - Wire protocol v1 (the current format) is maintained for backwards compatibility — new daemons continue to speak v1 to any still-running v0.x wrappers they encounter. Wire protocol v2 adds the T-piece instruction set and the state-blob push.
+    context: |-
+      The current wrapper (post-🎯T3) carries ~4,500 lines of hand-written C plus ~3,400 lines of vendored cJSON, about 78% of which is wire-format-aware (mcp.c, dispatch.c, transport_http.c, daemon_client.c, main.c). That directly contradicts the founding premise: "C for decades-unchanged longevity" only works when the C implements intrinsically stable primitives, not evolving protocols. Every MCP spec bump and every MCP Streamable HTTP revision is a potential churn event in C, which is a terrible language for tracking protocol evolution.
+
+      T4 inverts the split. The wrapper becomes a **durable custody layer** that speaks only in OS primitives. The daemon does all protocol parsing, state interpretation, and reload orchestration in Go where it belongs. The wrapper holds session state authoritatively; the daemon is stateless and reconciles from wrapper snapshots on reconnect.
+
+      Invariant stated cleanly (user, 2026-04-21): "The C wrapper is the authoritative holder of session state. The daemon is a reconcile-from-observation controller with no persistent memory. Every restart of the daemon is a rediscovery, not a recovery."
+
+      Added requirements from the design discussion:
+      - The wrapper must survive daemon restart and daemon upgrade without losing its handles, streams, or daemon-supplied state blob.
+      - The daemon pushes its per-wrapper state blob to the wrapper whenever it updates, so that on unexpected daemon restart the blob is available for the new daemon to read back.
+      - Schema migration (moving state from an older daemon schema to a newer one) is the new daemon's responsibility on reading the blob; the wrapper is schema-agnostic.
+      - HTTP mid-request survival of a daemon restart is explicitly NOT a goal — it is an unavoidable cost of putting HTTP awareness in the daemon.
+
+      This is a significant architectural overhaul, likely v1.0 material. Delivery order: spec (T4.1), new wrapper (T4.2), daemon absorbs protocol logic (T4.3), state-blob / migration (T4.4), compat + docs + release (T4.5).
+    depends_on:
+    - T4.1
+    - T4.2
+    - T4.3
+    - T4.4
+    - T4.5
+    tags:
+    - architecture
+    - wrapper
+    - daemon
+    - v1
+    origin: 2026-04-21 design discussion about C-program churn vs founding charter
+    discovered: 2026-04-21
+  T4.1:
+    name: 'Wire protocol v2 spec: T-piece instruction set, handle model, tag convention, snapshot format, and state-blob push/pull.'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - docs/wire-protocol.md gains a `v2` section covering every new daemon→wrapper instruction (run, connect, read, write, stream, stop_stream, close, wait) and every new wrapper→daemon event (hello, snapshot, stream_ended, handle_eof, error, ack).
+    - 'The handle model is specified: opaque integer IDs allocated by the wrapper, reserved handles (AGENT_IN, AGENT_OUT), and per-handle daemon-supplied opaque `tag` string stored verbatim by the wrapper.'
+    - 'The snapshot format is specified: an inventory of every handle, every active stream, and the current opaque state blob (with its schema version). Snapshot is sent by the wrapper immediately after hello on every reconnect.'
+    - 'The state-blob push mechanism is specified: a `set_state { blob, schema_version }` instruction the daemon sends whenever its per-wrapper state changes meaningfully. The wrapper stores the blob atomically and makes no assumptions about its contents. Size bounded (e.g. 64 KB).'
+    - 'Backwards compatibility with wire-protocol v1 is spelled out: the hello''s `v` field determines which protocol is spoken; daemons continue to implement v1 for already-deployed v0.x wrappers they encounter.'
+    - 'Envelope format decision captured: either keep newline-delimited JSON (cost: wrapper still needs a JSON parser) or switch to a length-prefixed binary envelope with a fixed opcode + payload shape (cost: protocol becomes less grep-able, harder to debug). Decision made with rationale.'
+    context: First sub-target of 🎯T4. Pure specification, no code yet. Landing this first gives the new wrapper (T4.2) and daemon-side changes (T4.3) a stable contract to implement against, and lets the envelope-format choice be made with full context before either side is committed.
+    tags:
+    - spec
+    - wire-protocol
+    origin: manual
+    discovered: 2026-04-21
+  T4.2:
+    name: New C wrapper — a protocol-agnostic T-piece under ~1,000 lines, with durable per-handle state and daemon-blob custody across daemon restarts.
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - The wrapper implements only the v2 instruction set from 🎯T4.1. No MCP framing, no HTTP, no SSE, no chunked encoding, no URL parser, no dispatch/FSM/initialize-replay logic anywhere in its source.
+    - 'Handle table: open children (with pid + cmd + argv), open TCP connections (with host + port), each with a daemon-supplied opaque tag up to some bounded size. Active streams tracked with (src, dst, bytes_copied).'
+    - 'State blob: on every `set_state { blob, schema_version }` instruction the wrapper stores the blob atomically, overwriting any prior value. On reconnect, the wrapper returns the blob verbatim in its snapshot.'
+    - 'Daemon-absent fallback: if argv contains `-- CMD ARGS...` and the daemon is unreachable, the wrapper falls back to today''s stdio behaviour (fork/exec + two streams between agent stdio and child stdio) and exits on agent EOF. HTTP fallback is explicitly unsupported.'
+    - Once the daemon has issued `run` + two `stream`s for a stdio wrap, bytes flow through the wrapper without any further daemon involvement. The daemon can be SIGKILLed mid-session and the wrapper keeps forwarding until the agent closes stdin.
+    - Vendored cJSON is deleted from the wrapper. JSON handling (if any survives the envelope-format decision in T4.1) is either a hand-rolled minimum subset or is gone entirely in favour of binary framing.
+    - 'Wrapper unit + integration tests cover: run/connect/stream happy paths, daemon-disconnect-mid-session, daemon-reconnect-with-snapshot, daemon-upgrade across restart (same session continues), exec failure, TCP connect failure, oversized blob rejection.'
+    context: 'Second sub-target of 🎯T4. Depends on T4.1 (needs the wire spec). This is where the bulk of the line-count reduction happens: from ~4,500 lines of hand-written C plus ~3,400 lines of cJSON down to ~1,000 lines of hand-written C with no vendored dependencies (or a minimal JSON subset, TBD in T4.1). The wrapper''s durability guarantees \u2014 surviving daemon restarts, surviving daemon upgrades, holding the daemon''s state blob across outages \u2014 are the hard requirements that keep this from being a trivial shell.'
+    depends_on:
+    - T4.1
+    tags:
+    - wrapper
+    - c
+    - rewrite
+    origin: manual
+    discovered: 2026-04-21
+  T4.3:
+    name: Daemon absorbs all MCP and HTTP protocol logic, driving the wrapper via v2 instructions; reload cycle runs end-to-end against the new T-piece.
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - The daemon (Go) implements MCP wire parsing, JSON-RPC id tracking, in-flight tracking, initialize-caching / replay, and list_changed synthesis on reload — previously in the C wrapper's dispatch.c / mcp.c.
+    - 'The daemon implements the HTTP backend: URL parsing, TCP connect (via wrapper''s `connect` instruction), HTTP/1.1 request construction, response parsing, chunked decoding, SSE event framing, MCP-Session-Id capture, MCP-Protocol-Version header — previously in the C wrapper''s transport_http.c. All of this uses Go''s `net/http` / `bufio` rather than hand-rolled code.'
+    - 'Reload orchestration: on SIGHUP or upgrade-source trigger, the daemon pauses streams, tears down the old backend, runs the new backend, writes the cached initialize, reads the response, writes list_changed notifications to AGENT_OUT, then resumes streams — all via wrapper instructions.'
+    - The existing stdio reload e2e test passes against the new wrapper + new daemon. A corresponding HTTP reload e2e test also passes.
+    - 'End-to-end smoke against live mnemo v0.21.0 succeeds: `mcpbridge --url http://localhost:19419/mcp --config mnemo` completes initialize + tools/list, and survives `brew services restart mnemo` with no agent-visible disconnect.'
+    context: 'Third sub-target of 🎯T4. Depends on T4.2 (needs the new wrapper as a target). This is the bulk of the Go-side work: porting MCP dispatch, FSM, initialize-replay, and the entire HTTP transport from C into the daemon. The daemon grows substantially, but that growth lives in a language designed for protocol evolution, where `encoding/json` and `net/http` do the heavy lifting for free.'
+    depends_on:
+    - T4.2
+    tags:
+    - daemon
+    - go
+    - mcp
+    - http
+    origin: manual
+    discovered: 2026-04-21
+  T4.4:
+    name: 'Daemon is stateless between restarts: pushes per-wrapper state blobs to each wrapper on change, reassembles its world from reconnecting wrappers, and migrates older blob schemas forward.'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - The daemon carries no persistent state file. All per-wrapper state lives in memory during its lifetime and is pushed to the owning wrapper (via `set_state`) whenever it changes meaningfully — e.g. after capturing an MCP-Session-Id, after a completed reload, after a version-seen update.
+    - On daemon startup, no wrappers are assumed to exist. Wrappers reconnect and send snapshots; the daemon assembles its view lazily from those snapshots. Wrappers that never reconnect are forgotten without consequence.
+    - 'The state blob is version-tagged with a `schema_version` integer. The daemon maintains a versioned migration pipeline: for any older schema version it encounters, it chains migrations up to the current version before use.'
+    - A migration regression test fixes a blob captured from each released daemon version on disk, loads it through the current daemon's migration pipeline, and asserts the result is semantically equivalent to what today's daemon would have produced from scratch.
+    - 'Daemon restart across version boundaries (old daemon schema v1 → new daemon schema v2) is demonstrated in an e2e test: old daemon persists a blob to the wrapper, gets replaced by a new daemon, new daemon reads the blob, migrates, and continues operation without requiring an agent-side restart.'
+    - Unexpected daemon crash (SIGKILL, panic) is treated identically to a clean restart from the wrapper's perspective — the daemon re-reads its world from snapshots + blobs with no need for a shutdown hook.
+    context: |-
+      Fourth sub-target of 🎯T4. Depends on T4.3 (needs the daemon to own enough state for the blob to be meaningful). This sub-target locks in the invariant that makes T4 worthwhile at all: the daemon is a reconcile-from-observation controller with no persistent memory. It also makes the wrapper's custody role concrete \u2014 not just for its own operational state, but for state the daemon hands it for safekeeping.
+
+      User framing (2026-04-21): "Upgrading state in the event of a daemon upgrade that uses a new schema would be entirely the daemon's concern. The T-piece would only concern itself with holding onto it while the daemon upgrades. The daemon should also push state changes to the T-piece regularly in the event of an unexpected restart."
+    depends_on:
+    - T4.3
+    tags:
+    - daemon
+    - state
+    - schema-migration
+    origin: manual
+    discovered: 2026-04-21
+  T4.5:
+    name: 'Compatibility, docs, and release: v2 daemons speak v1 to old wrappers; docs and STABILITY rewritten; shipped as the v1.0 release candidate.'
+    status: identified
+    value: 0.0
+    cost: 0.0
+    observable: true
+    acceptance:
+    - The v2 daemon accepts hellos from v1 wrappers (still-running v0.x processes) and serves them using the old MCP-aware-in-C protocol semantics, so upgrading the Homebrew formula does not orphan in-flight agent sessions. The v1 handler code path in the daemon is frozen; no new features are added to it.
+    - 'A migration guide in docs/ walks an existing 0.x user through the upgrade: what stays the same (user-facing config, client-side registration), what changes (wire protocol under the hood), and what edge cases to watch for (long-running 0.x wrappers encountering a 1.0 daemon).'
+    - 'README.md, agents-guide.md, STABILITY.md, docs/packaging.md, and docs/wire-protocol.md are rewritten to describe the T-piece architecture. The wrapper section of STABILITY.md commits to the v2 wire format as frozen-forever: future daemon versions must remain compatible.'
+    - The C wrapper's top-of-file comment and `--help-agent` text are updated to describe the T-piece model honestly (no MCP awareness, no HTTP awareness, just OS primitives driven by the daemon).
+    - Release notes for v1.0 explicitly call out the wrapper rewrite, the ~4,500 → ~1,000 line reduction, the removal of vendored cJSON, and the daemon-is-now-stateless invariant.
+    context: 'Fifth and final sub-target of 🎯T4. Depends on T4.4 (needs the full rewritten architecture working end-to-end). This is the "make it a releasable product" step: backwards compatibility with existing 0.x deployments, comprehensive doc rewrite, and the actual v1.0 cut. The v1 wire-protocol compatibility path in the daemon is the one-time cost we pay for never having to touch the C wrapper''s wire format again.'
+    depends_on:
+    - T4.4
+    tags:
+    - compat
+    - docs
+    - release
+    origin: manual
+    discovered: 2026-04-21
