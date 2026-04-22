@@ -7,7 +7,7 @@ format.
 
 ## 2026-04-22 — /release v0.3.0
 
-- **Commit**: `pending`
+- **Commit**: `057f47d`
 - **Outcome**: Shipped the HTTP backend (🎯T3) and the daemon
   brew-source launchd fix (🎯T2). `mcpbridge` now accepts
   `--url http://localhost:PORT/path` in addition to the existing
