@@ -4,7 +4,7 @@ mcpbridge is a pre-1.0 project. This document tracks the public
 interaction surface and what still needs to settle before a 1.0
 release.
 
-Snapshot as of: **v0.2.0**.
+Snapshot as of: **v0.3.0**.
 
 ## Stability commitment
 
@@ -62,6 +62,12 @@ Environment:
 - `MCPBRIDGE_SOCKET` — overrides the UDS path. **stable**.
 - `MCPBRIDGE_CONFIG_DIR` — overrides the config search path
   (primarily used by tests). **stable**.
+- `MCPBRIDGE_BREW_PATH` — explicit path to the `brew` executable
+  for the brew source backend. If unset, the daemon resolves via
+  `$PATH`, then falls back to known install locations
+  (`/opt/homebrew/bin/brew`, `/usr/local/bin/brew`,
+  `/home/linuxbrew/.linuxbrew/bin/brew`). Added in v0.3.0.
+  **stable**.
 
 ### Socket path resolution
 
@@ -252,11 +258,17 @@ These must be addressed before the v1.0.0 release can ship.
    somewhere that bypasses the injection. A pre-tag lint would
    be nice.
 
-6. **No mnemo-side integration.** The old Go library in this repo
-   was deleted on the assumption mnemo would be reworked to target
-   the new wrapper. That rework lives in mnemo's own repo and is
-   not blocking this project's 1.0, but it's the canary that
-   tells us whether the wire protocol survives real use.
+6. **mnemo integration path is via the HTTP backend.** The old
+   Go library in this repo was deleted on the assumption mnemo
+   would be reworked to target the new wrapper. mnemo 0.20.0
+   (2026-04-18) took a different path: it collapsed to a single
+   HTTP MCP daemon. Integration now happens via mcpbridge's HTTP
+   backend (🎯T3) rather than a dedicated wrapper-aware library
+   on mnemo's side. Smoke-verified against a live mnemo 0.21.0
+   during v0.3.0 prep: `mcpbridge --url http://localhost:19419/mcp
+   --config mnemo` completes initialize + tools/list end-to-end.
+   Not a 1.0 blocker; HTTP-backed flows need more real-world use
+   before the v0.3.0 scope can be declared settled.
 
 ## Out of scope for 1.0
 
@@ -280,13 +292,16 @@ These must be addressed before the v1.0.0 release can ship.
 
 ## Settling clock
 
-Surface item count (rough): ~30 public items (CLI flags × 2
+Surface item count (rough): ~35 public items (CLI flags × 2
 binaries + wire protocol message types + config schema fields +
 environment variables + signals). That puts us in the 20–50
 bracket → **minimum 2 months settling period** before 1.0
 eligibility.
 
-Clock starts at the last breaking change to the interaction
-surface. As of v0.1.0, the clock starts **now**, so the earliest
-1.0 release is at least 2 months out — assuming no breaking
-changes land in the meantime.
+Clock starts at the last additive change to the interaction
+surface that's material enough to warrant re-settling. v0.3.0
+adds the `--url URL` flag, the `MCPBRIDGE_BREW_PATH` env var, and
+the HTTP backend semantics — a meaningful expansion that restarts
+the clock at **2026-04-22**. Earliest 1.0 eligibility is therefore
+at least 2 months out from that date, assuming no further
+breaking or significantly-additive changes.
