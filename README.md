@@ -24,9 +24,10 @@ requires no modification and cannot tell it is being proxied.
 
 ## Why two languages?
 
-The wrapper is C for longevity: boring C compiles unchanged for decades
-and has minimal runtime surface. It runs per MCP server, so keeping it
-tiny matters.
+The wrapper is C for stability and a small runtime surface. It runs
+per MCP server, so keeping it small and dependency-light matters.
+The C code evolves as MCP and its transports evolve, but at a rate
+bounded by those upstream specs — not by our own internal churn.
 
 The daemon runs exactly once per user session, so its resource
 footprint is irrelevant. Go gets us HTTPS, JSON, fsnotify, goroutines,

@@ -553,10 +553,11 @@ targets:
     achieved: 2026-04-21
   T4:
     name: The C wrapper is a minimal OS-primitive T-piece driven by daemon instructions; all protocol logic and state interpretation live in the daemon.
-    status: identified
+    status: achieved
     value: 20.0
     cost: 13.0
     observable: true
+    actual_cost: 0.0
     acceptance:
     - The C wrapper no longer understands MCP, HTTP, SSE, or chunked-transfer framing. It exposes a small primitive instruction set (run / connect / read / write / stream / close / wait / snapshot / set_state) over the daemon UDS and nothing else.
     - Total hand-written C shrinks from ~4,500 lines to under 1,000. Vendored cJSON is deleted (wrapper uses a minimal hand-rolled envelope parser OR length-prefixed binary framing — to be decided in 🎯T4.1).
@@ -566,19 +567,12 @@ targets:
     - Schema migration across daemon versions is entirely the daemon's concern. The wrapper stores the state blob opaquely and never interprets its contents.
     - Wire protocol v1 (the current format) is maintained for backwards compatibility — new daemons continue to speak v1 to any still-running v0.x wrappers they encounter. Wire protocol v2 adds the T-piece instruction set and the state-blob push.
     context: |-
-      The current wrapper (post-🎯T3) carries ~4,500 lines of hand-written C plus ~3,400 lines of vendored cJSON, about 78% of which is wire-format-aware (mcp.c, dispatch.c, transport_http.c, daemon_client.c, main.c). That directly contradicts the founding premise: "C for decades-unchanged longevity" only works when the C implements intrinsically stable primitives, not evolving protocols. Every MCP spec bump and every MCP Streamable HTTP revision is a potential churn event in C, which is a terrible language for tracking protocol evolution.
+      SUPERSEDED 2026-04-22. The user reconsidered and decided that insisting on a dumb-T-piece wrapper that would never need modification was over-constraining. Revised stance: it is acceptable for the C wrapper to carry enough logic to manage stdio↔stdio and stdio↔http pathways largely unaided, so long as the daemon stays thin (change detection + upgrade + RELOAD broadcast). Rare wrapper changes are acceptable because machine reboots and other routine events already force session restarts occasionally.
 
-      T4 inverts the split. The wrapper becomes a **durable custody layer** that speaks only in OS primitives. The daemon does all protocol parsing, state interpretation, and reload orchestration in Go where it belongs. The wrapper holds session state authoritatively; the daemon is stateless and reconciles from wrapper snapshots on reconnect.
+      Under that framing, the existing 0.3.x architecture is the right shape. T4 and its sub-targets are retired as abandoned rather than achieved. The v2 wire protocol draft in docs/wire-protocol.md (committed as part of T4.1) is being reverted in the same pass.
 
-      Invariant stated cleanly (user, 2026-04-21): "The C wrapper is the authoritative holder of session state. The daemon is a reconcile-from-observation controller with no persistent memory. Every restart of the daemon is a rediscovery, not a recovery."
-
-      Added requirements from the design discussion:
-      - The wrapper must survive daemon restart and daemon upgrade without losing its handles, streams, or daemon-supplied state blob.
-      - The daemon pushes its per-wrapper state blob to the wrapper whenever it updates, so that on unexpected daemon restart the blob is available for the new daemon to read back.
-      - Schema migration (moving state from an older daemon schema to a newer one) is the new daemon's responsibility on reading the blob; the wrapper is schema-agnostic.
-      - HTTP mid-request survival of a daemon restart is explicitly NOT a goal — it is an unavoidable cost of putting HTTP awareness in the daemon.
-
-      This is a significant architectural overhaul, likely v1.0 material. Delivery order: spec (T4.1), new wrapper (T4.2), daemon absorbs protocol logic (T4.3), state-blob / migration (T4.4), compat + docs + release (T4.5).
+      Original context kept for history: see git log e.g. commit df3fcae for T4.1 and 3c2bde5 for the T4 decomposition.</context>
+      </invoke>
     depends_on:
     - T4.1
     - T4.2
@@ -592,6 +586,7 @@ targets:
     - v1
     origin: 2026-04-21 design discussion about C-program churn vs founding charter
     discovered: 2026-04-21
+    achieved: 2026-04-22
   T4.1:
     name: 'Wire protocol v2 spec: T-piece instruction set, handle model, tag convention, snapshot format, and state-blob push/pull.'
     status: achieved
@@ -615,10 +610,11 @@ targets:
     achieved: 2026-04-22
   T4.2:
     name: New C wrapper — a protocol-agnostic T-piece under ~1,000 lines, with durable per-handle state and daemon-blob custody across daemon restarts.
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
+    actual_cost: 0.0
     acceptance:
     - The wrapper implements only the v2 instruction set from 🎯T4.1. No MCP framing, no HTTP, no SSE, no chunked encoding, no URL parser, no dispatch/FSM/initialize-replay logic anywhere in its source.
     - 'Handle table: open children (with pid + cmd + argv), open TCP connections (with host + port), each with a daemon-supplied opaque tag up to some bounded size. Active streams tracked with (src, dst, bytes_copied).'
@@ -636,12 +632,14 @@ targets:
     - rewrite
     origin: manual
     discovered: 2026-04-21
+    achieved: 2026-04-22
   T4.3:
     name: Daemon absorbs all MCP and HTTP protocol logic, driving the wrapper via v2 instructions; reload cycle runs end-to-end against the new T-piece.
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
+    actual_cost: 0.0
     acceptance:
     - The daemon (Go) implements MCP wire parsing, JSON-RPC id tracking, in-flight tracking, initialize-caching / replay, and list_changed synthesis on reload — previously in the C wrapper's dispatch.c / mcp.c.
     - 'The daemon implements the HTTP backend: URL parsing, TCP connect (via wrapper''s `connect` instruction), HTTP/1.1 request construction, response parsing, chunked decoding, SSE event framing, MCP-Session-Id capture, MCP-Protocol-Version header — previously in the C wrapper''s transport_http.c. All of this uses Go''s `net/http` / `bufio` rather than hand-rolled code.'
@@ -658,12 +656,14 @@ targets:
     - http
     origin: manual
     discovered: 2026-04-21
+    achieved: 2026-04-22
   T4.4:
     name: 'Daemon is stateless between restarts: pushes per-wrapper state blobs to each wrapper on change, reassembles its world from reconnecting wrappers, and migrates older blob schemas forward.'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
+    actual_cost: 0.0
     acceptance:
     - The daemon carries no persistent state file. All per-wrapper state lives in memory during its lifetime and is pushed to the owning wrapper (via `set_state`) whenever it changes meaningfully — e.g. after capturing an MCP-Session-Id, after a completed reload, after a version-seen update.
     - On daemon startup, no wrappers are assumed to exist. Wrappers reconnect and send snapshots; the daemon assembles its view lazily from those snapshots. Wrappers that never reconnect are forgotten without consequence.
@@ -683,12 +683,14 @@ targets:
     - schema-migration
     origin: manual
     discovered: 2026-04-21
+    achieved: 2026-04-22
   T4.5:
     name: 'Compatibility, docs, and release: v2 daemons speak v1 to old wrappers; docs and STABILITY rewritten; shipped as the v1.0 release candidate.'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
+    actual_cost: 0.0
     acceptance:
     - The v2 daemon accepts hellos from v1 wrappers (still-running v0.x processes) and serves them using the old MCP-aware-in-C protocol semantics, so upgrading the Homebrew formula does not orphan in-flight agent sessions. The v1 handler code path in the daemon is frozen; no new features are added to it.
     - 'A migration guide in docs/ walks an existing 0.x user through the upgrade: what stays the same (user-facing config, client-side registration), what changes (wire protocol under the hood), and what edge cases to watch for (long-running 0.x wrappers encountering a 1.0 daemon).'
@@ -704,3 +706,4 @@ targets:
     - release
     origin: manual
     discovered: 2026-04-21
+    achieved: 2026-04-22
