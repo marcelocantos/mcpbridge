@@ -594,10 +594,11 @@ targets:
     discovered: 2026-04-21
   T4.1:
     name: 'Wire protocol v2 spec: T-piece instruction set, handle model, tag convention, snapshot format, and state-blob push/pull.'
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     observable: true
+    actual_cost: 3.0
     acceptance:
     - docs/wire-protocol.md gains a `v2` section covering every new daemon→wrapper instruction (run, connect, read, write, stream, stop_stream, close, wait) and every new wrapper→daemon event (hello, snapshot, stream_ended, handle_eof, error, ack).
     - 'The handle model is specified: opaque integer IDs allocated by the wrapper, reserved handles (AGENT_IN, AGENT_OUT), and per-handle daemon-supplied opaque `tag` string stored verbatim by the wrapper.'
@@ -611,6 +612,7 @@ targets:
     - wire-protocol
     origin: manual
     discovered: 2026-04-21
+    achieved: 2026-04-22
   T4.2:
     name: New C wrapper — a protocol-agnostic T-piece under ~1,000 lines, with durable per-handle state and daemon-blob custody across daemon restarts.
     status: identified
