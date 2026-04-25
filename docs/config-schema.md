@@ -1,27 +1,39 @@
 # mcpbridge config schema
 
-Version: **1**
+Version: **2**
 
-Per-server JSON config files describe how the daemon should check
-for and install a new version of a wrapped MCP server. Files live
-in (in precedence order):
+Per-server JSON config files describe one wrapped MCP server: how
+to reach it, how to check for new versions, and whether to upgrade
+automatically. Two consumers read the same file:
 
-1. `~/.config/mcpbridge/<name>.json` — user-local, wins over system
-2. `$HOMEBREW_PREFIX/share/mcpbridge/<name>.json` — system-wide,
-   typically populated by a brew formula
-3. `/usr/local/share/mcpbridge/<name>.json` — alternate system dir
-   for non-Apple-Silicon Homebrew installs
+- **The wrapper** (`mcpbridge connect <path>`) reads exactly the
+  file it's pointed at and uses the connection fields to bring up
+  the backend.
+- **The daemon** (`mcpbridge-daemon`) scans well-known directories,
+  reads every `*.json` file it finds, and uses the upgrade fields
+  to poll for new versions and signal the wrapper to reload.
 
-The filename is a convention, not a requirement — the daemon reads
-`name` from inside the file. Conventionally, file name matches
-`name` for grep-ability.
+The wrapper takes a path on the command line, so it has no
+discovery convention. The daemon's discovery dirs (in order) are:
+
+1. `~/.config/mcpbridge/`
+2. `$HOMEBREW_PREFIX/share/mcpbridge/` — typically populated by a
+   brew formula on install
+3. `/usr/local/share/mcpbridge/` — alternate system dir for
+   non-Apple-Silicon Homebrew installs
+
+Filename is irrelevant to identity — the daemon reads `name` from
+inside the file. Conventionally, file name matches `name` for
+grep-ability.
 
 ## Envelope
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "name": "mnemo",
+  "command": "/opt/homebrew/bin/mnemo",
+  "args": [],
   "source": { ... },
   "upgrade": "notify",
   "check_interval": "1h"
@@ -30,11 +42,17 @@ The filename is a convention, not a requirement — the daemon reads
 
 | Field | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `schema` | int | yes | — | Config schema version. Must be `1` for this daemon. |
-| `name` | string | yes | — | Config name. Must match what the wrapper registers as. For the stdio backend the default is `basename(argv[1])` (the wrapped command); for the HTTP backend (`--url`) no default is available and `--config NAME` must be passed explicitly. Either way, `--config NAME` on the command line overrides the default. |
+| `schema` | int | yes | — | Schema version. Must be `2`. Schema v1 is no longer accepted. |
+| `name` | string | yes | — | Identifier the wrapper sends to the daemon on registration; the daemon routes reload broadcasts by this name. Must be unique across all loaded configs. |
+| `command` | string | one of `command`/`url` | — | **Stdio backend.** Absolute path to the wrapped server's binary. Tilde-expanded (`~/...`, `~user/...`) at parse time. |
+| `args` | array of string | no | `[]` | **Stdio backend.** Arguments passed verbatim to `execvp`; no shell expansion. |
+| `url` | string | one of `command`/`url` | — | **HTTP backend.** Plain `http://` URL to a localhost MCP Streamable HTTP endpoint. Host must be `localhost`, `127.0.0.1`, or `::1`. `https://` and remote hosts are out of scope for v1. |
 | `source` | object | yes | — | Upgrade source backend — see [Sources](#sources). |
 | `upgrade` | enum | no | `notify` | One of `off`, `notify`, `auto`. See [Upgrade modes](#upgrade-modes). |
 | `check_interval` | duration | no | `1h` | How often to poll the source. Accepts Go duration strings (`30m`, `1h`, `6h`). |
+
+Exactly one of `command` or `url` must be set. The wrapper picks
+the backend based on which field is populated.
 
 ## Sources
 
@@ -84,8 +102,7 @@ The daemon fetches `/repos/<repo>/releases/latest` from
 value (so first-poll-per-config establishes a baseline without a
 spurious install), and — in `auto` mode — downloads the asset,
 optionally verifies its SHA256, extracts a named binary from a
-tarball if applicable, and atomically replaces the installed binary
-at the wrapper's registered `child_binary` path.
+tarball if applicable, and atomically replaces the installed binary.
 
 ## Upgrade modes
 
@@ -93,16 +110,17 @@ at the wrapper's registered `child_binary` path.
 |---|---|
 | `off` | Config is parsed and the wrapper sees `config_found=true, polling=false`, but the daemon never calls the source backend. Useful for disabling auto-upgrade for a single server without deleting the file. |
 | `notify` | **Default.** Detects new versions and logs them, but does not install. The wrapper still cycles its child when the user runs `brew upgrade` (or equivalent) themselves — fsnotify catches the file change and pushes a reload. |
-| `auto` | Detects **and** installs new versions, then pushes a targeted reload so the wrapper cycles its child to pick up the new binary. |
+| `auto` | Detects **and** installs new versions, then pushes a targeted reload so the wrapper cycles its backend to pick up the new binary. |
 
 ## Example configs
 
-### mnemo via brew, notify only
+### mnemo via brew, stdio backend, notify only
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "name": "mnemo",
+  "command": "/opt/homebrew/bin/mnemo",
   "source": {
     "type": "brew",
     "formula": "marcelocantos/tap/mnemo"
@@ -112,20 +130,56 @@ at the wrapper's registered `child_binary` path.
 
 (`notify` + `1h` interval are defaults.)
 
-### mcp-foo via github, fully automatic
+### vellum via github, HTTP backend, fully automatic
 
 ```json
 {
-  "schema": 1,
-  "name": "mcp-foo",
+  "schema": 2,
+  "name": "vellum",
+  "url": "http://localhost:9000/mcp",
   "source": {
     "type": "github",
-    "repo": "owner/mcp-foo",
-    "asset": "mcp-foo-{version}-{os}-{arch}.tar.gz",
-    "binary_in_archive": "mcp-foo",
+    "repo": "owner/vellum",
+    "asset": "vellum-{version}-{os}-{arch}.tar.gz",
+    "binary_in_archive": "vellum",
     "checksum_asset": "SHA256SUMS"
   },
   "upgrade": "auto",
   "check_interval": "30m"
 }
 ```
+
+### tilde expansion for command
+
+```json
+{
+  "schema": 2,
+  "name": "my-dev-server",
+  "command": "~/code/my-mcp-server/bin/my-mcp-server",
+  "args": ["--config", "~/code/my-mcp-server/dev.toml"],
+  "source": {
+    "type": "github",
+    "repo": "me/my-mcp-server"
+  }
+}
+```
+
+`command` is tilde-expanded at parse time; `args` are not (no
+shell expansion — they're passed verbatim to `execvp`).
+
+## Migration from schema v1
+
+Schema v1 (the v0.3.0 form) had no connection metadata in the
+config file — connection details came from argv (`-- COMMAND` or
+`--url URL`). Pre-1.0, no auto-migration is provided. Edit each
+file once:
+
+1. Set `"schema": 2`.
+2. Add `"command": "/path/to/binary"` (and optional `"args": [...]`)
+   for stdio servers, or `"url": "http://localhost:PORT/path"` for
+   HTTP servers.
+3. Update your MCP client config to use `mcpbridge connect <path>`
+   instead of `mcpbridge -- COMMAND` / `mcpbridge --url URL --config NAME`.
+
+The `name`, `source`, `upgrade`, and `check_interval` fields are
+unchanged.

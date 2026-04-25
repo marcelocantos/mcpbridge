@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 targets:
   T1:
     name: A generic C wrapper transparently proxies any stdio MCP server with automatic upgrade detection and execution, keeping the agent's MCP session alive across child restarts.
@@ -430,7 +430,7 @@ targets:
     status: achieved
     value: 13.0
     cost: 8.0
-    observable: true
+    showcase: true
     actual_cost: 13.0
     acceptance:
     - 'A new `transport_http.{c,h}` implements the `struct transport_ops` vtable against an MCP Streamable HTTP endpoint: HTTP/1.1 POST for client→server, SSE for server→client, single URL.'
@@ -459,7 +459,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     actual_cost: 2.0
     acceptance:
     - '`struct transport_ops` in `wrapper/src/transport.h` exposes message-oriented operations (e.g. `read_frame`, `write_frame`, or equivalent pull/push primitives) in place of the current `read_fd` / `write_fd` pair. The vtable no longer assumes the transport is backed by file descriptors.'
@@ -480,7 +480,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     actual_cost: 8.0
     acceptance:
     - 'New `wrapper/src/transport_http.{c,h}` implements the message-oriented `struct transport_ops` from T3.1 against an MCP Streamable HTTP endpoint: HTTP/1.1 POST for client→server JSON-RPC, SSE (`text/event-stream`) for server→client messages, single URL for both directions.'
@@ -509,7 +509,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     actual_cost: 5.0
     acceptance:
     - '`main.c` accepts `--url URL` as a new flag. When present, the wrapper constructs a `transport_http` (from T3.2) instead of `transport_stdio`; the existing `-- COMMAND [ARGS]` path is untouched and continues to select stdio.'
@@ -534,7 +534,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     actual_cost: 2.0
     acceptance:
     - README.md describes both backend shapes (stdio child vs. HTTP endpoint), states the front-end-is-always-stdio constraint, and links to the config-schema reference.
@@ -556,7 +556,7 @@ targets:
     status: achieved
     value: 20.0
     cost: 13.0
-    observable: true
+    showcase: true
     actual_cost: 0.0
     acceptance:
     - The C wrapper no longer understands MCP, HTTP, SSE, or chunked-transfer framing. It exposes a small primitive instruction set (run / connect / read / write / stream / close / wait / snapshot / set_state) over the daemon UDS and nothing else.
@@ -592,7 +592,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     actual_cost: 3.0
     acceptance:
     - docs/wire-protocol.md gains a `v2` section covering every new daemon→wrapper instruction (run, connect, read, write, stream, stop_stream, close, wait) and every new wrapper→daemon event (hello, snapshot, stream_ended, handle_eof, error, ack).
@@ -613,7 +613,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     actual_cost: 0.0
     acceptance:
     - The wrapper implements only the v2 instruction set from 🎯T4.1. No MCP framing, no HTTP, no SSE, no chunked encoding, no URL parser, no dispatch/FSM/initialize-replay logic anywhere in its source.
@@ -638,7 +638,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     actual_cost: 0.0
     acceptance:
     - The daemon (Go) implements MCP wire parsing, JSON-RPC id tracking, in-flight tracking, initialize-caching / replay, and list_changed synthesis on reload — previously in the C wrapper's dispatch.c / mcp.c.
@@ -662,7 +662,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     actual_cost: 0.0
     acceptance:
     - The daemon carries no persistent state file. All per-wrapper state lives in memory during its lifetime and is pushed to the owning wrapper (via `set_state`) whenever it changes meaningfully — e.g. after capturing an MCP-Session-Id, after a completed reload, after a version-seen update.
@@ -689,7 +689,7 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    observable: true
+    showcase: true
     actual_cost: 0.0
     acceptance:
     - The v2 daemon accepts hellos from v1 wrappers (still-running v0.x processes) and serves them using the old MCP-aware-in-C protocol semantics, so upgrading the Homebrew formula does not orphan in-flight agent sessions. The v1 handler code path in the daemon is frozen; no new features are added to it.
@@ -707,3 +707,141 @@ targets:
     origin: manual
     discovered: 2026-04-21
     achieved: 2026-04-22
+  T5:
+    name: Agent reaches every wrapped MCP server through a uniform `mcpbridge connect &lt;name&gt;` front door, regardless of backend transport
+    status: identified
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    acceptance:
+    - 'The agent''s MCP client config form is identical across stdio and HTTP backends: `mcpbridge connect <name>` (or equivalent JSON `command`+`args` shape).'
+    - Switching a server's backend type (stdio↔HTTP) requires only an edit to the daemon-side config; the agent's MCP client config does not change.
+    - Existing v0.3.0 stdio invocations (`mcpbridge -- COMMAND`) and HTTP invocations (`mcpbridge --url ... --config NAME`) are removed; the wrapper rejects them with a migration message.
+    - The wrapper still works when the daemon is down (it reads the same config files the daemon does for connection lookup; loses only upgrade signaling).
+    - 'End-to-end tests cover both transports through the new front door: stdio child cycle on reload; HTTP backend cycle on reload.'
+    - All v0.3.0 documentation is rewritten to use the new form.
+    context: |-
+      v0.3.0 ships two distinct agent-config shapes — `mcpbridge -- COMMAND` for stdio backends, `mcpbridge --url URL --config NAME` for HTTP backends. A backend-transport change in the wrapped server (e.g., mnemo went stdio→HTTP at v0.20.0) forces the user to rewrite the agent's MCP client config. That's the wrong axis of variability: agents should care about **identity** (which server am I talking to), not **transport** (how is it currently implemented).
+
+      The unified front door collapses both forms to a single shape:
+
+          mcpbridge connect <name>
+
+      mcpbridge looks up `<name>` in a config file that holds the connection details (command+args for stdio, url for HTTP) plus the upgrade metadata it already carries. Backend-transport changes become a daemon-side config edit; the agent's MCP client config never moves. The wrapper continues to bridge stdio↔stdio or stdio↔HTTP per backend type, so the agent always sees a stdio MCP server.
+
+      Daemon role is unchanged: UDS-only, upgrade polling, reload signals. No HTTP listener — that experiment (briefly explored earlier this session) is superseded.
+
+      This is a breaking change to v0.3.0's CLI. Pre-1.0; permitted. Migration notes go in release notes.
+    origin: design discussion 2026-04-25 (supersedes earlier T5 attempt)
+    discovered: 2026-04-25
+  T5.1:
+    name: Config schema v2 carries connection metadata alongside upgrade metadata
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - daemon/internal/config parses schema:2 files with connection fields
+    - 'Validation rejects: schema!=2, both command+url, neither command+url, url with non-loopback host, url with https://'
+    - Existing v1 config-related tests rewritten or replaced; v1 schema explicitly rejected with a migration message
+    - docs/config-schema.md rewritten for v2 (under 🎯T5.4 it gets cross-doc updates; this leaf delivers the schema doc itself)
+    - Tilde-expansion helper (`~`, `~user`) shared by wrapper and daemon for the `command` field; resolves relative to $HOME
+    context: |-
+      The v1 config file describes only how the daemon should poll for upgrades. v2 extends it to also describe how to connect to the wrapped server, so the same file is the single source of truth for both wrapper (connection details) and daemon (upgrade source).
+
+      Schema v2 envelope:
+
+          { "schema": 2,
+            "name": "mnemo",
+            "command": "/opt/homebrew/bin/mnemo",   // stdio backend
+            "args": [],                              //   "
+            // — OR —
+            "url": "http://localhost:19419/mcp",    // http backend
+            "source": { "type": "brew", ... },       // upgrade source (unchanged)
+            "upgrade": "auto", "check_interval": "30m" }
+
+      Validation: exactly one of {command, url} must be present. URL constraints inherit from v1's --url backend (plain http:// to loopback hosts only). The `name` field stays as the identifier shared with the daemon for reload routing — no longer constrained to match the filename.
+
+      No backward-compat with v1 (pre-1.0; release notes document the migration).
+    origin: decomposition of 🎯T5
+    discovered: 2026-04-25
+    achieved: 2026-04-25
+  T5.2:
+    name: Wrapper takes `mcpbridge connect &lt;path&gt;` and reads connection details from the file
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - '`mcpbridge connect ~/.config/mcpbridge/mnemo.json` brings up a stdio child per the file''s `command`/`args`'
+    - '`mcpbridge connect ~/.config/mcpbridge/some-http.json` brings up an HTTP backend per the file''s `url`'
+    - '`mcpbridge -- foo` and `mcpbridge --url ...` print a one-line migration message and exit 2'
+    - '`mcpbridge connect /nonexistent.json` fails fast with a clear error'
+    - '`mcpbridge connect <bad-schema.json>` (e.g., schema:1, or missing both command+url) fails fast with a clear validation error'
+    - Existing wrapper unit tests adapted to the new entry shape; transport_stdio_test, transport_http_test, dispatch_test, fsm_test, daemon_client_test still pass
+    - End-to-end stdio reload test (e2e_reload_test.sh) and HTTP reload test (e2e_http_reload_test.sh) updated to drive the wrapper via the new `connect <path>` form and pass
+    context: |-
+      Replaces the v0.3.0 argv-driven backend selection with config-file-driven selection.
+
+      CLI changes:
+      - `mcpbridge connect <path>` — new subcommand; reads the named JSON file (with `~` expansion + relative-to-cwd resolution), determines backend type from the file's contents (command → stdio, url → http), and dispatches accordingly.
+      - `mcpbridge -- COMMAND [ARGS...]` — removed. Passing `--` prints a clear migration message pointing at the new form.
+      - `mcpbridge --url URL --config NAME` — removed. Same migration message.
+      - `--config NAME` — removed (the file already carries `name`).
+
+      Other flags (`--socket`, `-v`/`--verbose`, `--version`, `--help`, `--help-agent`) keep their semantics, hoisted to apply to all subcommands.
+
+      The wrapper's existing transport vtable, transport_stdio, transport_http, dispatch, fsm, and daemon_client are largely unchanged; the diff is concentrated in main.c (argv parsing, config-file reading, transport selection).
+
+      Wrapper still works with daemon down — it now reads connection details from a file rather than argv, but that's still local. Daemon is required only for upgrade signaling.
+    depends_on:
+    - T5.1
+    origin: decomposition of 🎯T5
+    discovered: 2026-04-25
+  T5.3:
+    name: Daemon loads schema v2 configs for upgrade polling
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Daemon loads schema:2 configs from the standard discovery dirs
+    - Daemon logs and skips schema:1 files (with a one-line migration hint)
+    - All scheduler / source / watcher tests still pass against schema:2 fixtures
+    - 'Per-server config tests cover: stdio config, http config, both-command-and-url (rejected), neither (rejected), schema:1 (rejected with migration message)'
+    context: |-
+      Daemon-side complement to 🎯T5.1. The daemon's config loader (daemon/internal/config) is updated to read schema:2 files; existing source backends (brew, github), scheduler, watcher, and socket server consume only the upgrade-related fields, so the changes are isolated to the config package.
+
+      Discovery directories stay as v0.3.0: `~/.config/mcpbridge/`, `$HOMEBREW_PREFIX/share/mcpbridge/`. The daemon walks these and parses every `*.json` it finds. Files that fail validation are logged and skipped; the daemon doesn't refuse to start because of one bad config.
+
+      The connection fields (`command`, `args`, `url`) are read but unused on the daemon side — they exist only for the wrapper. The daemon could in principle warn if the upgrade source's expected binary path doesn't match the config's `command`, but that's a nice-to-have, not in scope here.
+    depends_on:
+    - T5.1
+    origin: decomposition of 🎯T5
+    discovered: 2026-04-25
+  T5.4:
+    name: Docs reflect the unified `mcpbridge connect &lt;path&gt;` front door
+    status: identified
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    acceptance:
+    - README quickstart uses `mcpbridge connect <path>` with no transport branching
+    - agents-guide.md install walkthrough produces a working setup end-to-end with the new form
+    - docs/packaging.md client-config section shows the new form for both stdio and HTTP example servers
+    - docs/config-schema.md describes schema v2 with the connection fields
+    - STABILITY.md interaction-surface table replaces v0.3.0's wrapper CLI rows with the v0.4.0 form; settling clock restart noted
+    - 'All four docs are internally consistent: no straggler references to `--`, `--url`, or `--config NAME`'
+    context: |-
+      Cross-doc rewrite for the unified front door:
+
+      - README.md: introduction reframes mcpbridge as a single CLI form with a config file per server. Quick-start prompt updated.
+      - agents-guide.md: install walkthrough switches to schema-v2 configs and the `connect <path>` form. Drops the two-form (stdio vs http) explanation — there's only one form now.
+      - docs/packaging.md: client-config section uses the new form. Brew formula example points at `$HOMEBREW_PREFIX/share/mcpbridge/<name>.json`.
+      - docs/config-schema.md: rewritten for schema v2 (the schema doc itself is delivered under 🎯T5.1; this leaf verifies cross-doc consistency).
+      - docs/wire-protocol.md: untouched (UDS protocol unchanged).
+      - STABILITY.md: surface catalogue updated for v0.4.0 — wrapper CLI replaced with `connect <path>`; settling clock restarts.
+
+      Showcase: an end-to-end walkthrough that an agent can follow to install mcpbridge, drop a config file, point its MCP client at `mcpbridge connect <path>`, and have a working bridged session.
+    depends_on:
+    - T5.2
+    - T5.3
+    origin: decomposition of 🎯T5
+    discovered: 2026-04-25
