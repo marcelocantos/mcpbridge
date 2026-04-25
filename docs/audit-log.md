@@ -7,7 +7,7 @@ format.
 
 ## 2026-04-25 — /release v0.4.0
 
-- **Commit**: pending
+- **Commit**: `7818a50`
 - **Outcome**: Shipped the unified-front-door rework (🎯T5). The
   wrapper's CLI collapses to `mcpbridge connect <path>` regardless
   of backend transport; backend type (stdio command+args vs HTTP
