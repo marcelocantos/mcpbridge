@@ -37,9 +37,9 @@ const DefaultCoalesceWindow = 300 * time.Millisecond
 // Watcher tracks a set of (name, absolutePath) pairs and broadcasts
 // a reload to each corresponding name when its path changes.
 type Watcher struct {
-	fs        *fsnotify.Watcher
-	bcast     Broadcaster
-	coalesce  time.Duration
+	fs       *fsnotify.Watcher
+	bcast    Broadcaster
+	coalesce time.Duration
 
 	mu     sync.Mutex
 	byName map[string]string   // name -> absolute path

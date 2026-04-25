@@ -41,12 +41,12 @@ func (f *fakeBrew) Upgrade(_ context.Context, formula string) error {
 }
 
 type fakeGitHub struct {
-	mu            sync.Mutex
-	latestInfo    *source.LatestInfo
-	latestErr     error
-	installErr    error
-	installCalls  []installCall
-	latestCalls   int
+	mu           sync.Mutex
+	latestInfo   *source.LatestInfo
+	latestErr    error
+	installErr   error
+	installCalls []installCall
+	latestCalls  int
 }
 
 type installCall struct {
@@ -76,10 +76,10 @@ func (f *fakeGitHub) Install(_ context.Context, cfg *config.Config, installedVer
 }
 
 type fakeBroadcaster struct {
-	mu           sync.Mutex
-	destByName   map[string]string
-	reloadCalls  []reloadCall
-	reloadedCnt  int
+	mu          sync.Mutex
+	destByName  map[string]string
+	reloadCalls []reloadCall
+	reloadedCnt int
 }
 
 type reloadCall struct {

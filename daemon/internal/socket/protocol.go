@@ -17,15 +17,15 @@ const ProtocolVersion = 1
 type MessageType string
 
 const (
-	TypeHello       MessageType = "hello"
-	TypeHelloOK     MessageType = "hello_ok"
-	TypeRegister    MessageType = "register"
-	TypeRegisterOK  MessageType = "register_ok"
-	TypeDeregister  MessageType = "deregister"
-	TypeReload      MessageType = "reload"
-	TypeReloadAck   MessageType = "reload_ack"
-	TypeShutdown    MessageType = "shutdown"
-	TypeError       MessageType = "error"
+	TypeHello      MessageType = "hello"
+	TypeHelloOK    MessageType = "hello_ok"
+	TypeRegister   MessageType = "register"
+	TypeRegisterOK MessageType = "register_ok"
+	TypeDeregister MessageType = "deregister"
+	TypeReload     MessageType = "reload"
+	TypeReloadAck  MessageType = "reload_ack"
+	TypeShutdown   MessageType = "shutdown"
+	TypeError      MessageType = "error"
 )
 
 // Envelope is the shared wrapper every message on the wire is
