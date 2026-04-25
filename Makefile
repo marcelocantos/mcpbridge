@@ -9,7 +9,7 @@ VERSION ?= 0.0.0-dev
 PREFIX  ?= /usr/local
 
 .PHONY: all wrapper daemon test wrapper-test daemon-test clean install \
-        wrapper-clean daemon-clean wrapper-install daemon-install
+        wrapper-clean daemon-clean wrapper-install daemon-install bullseye
 
 all: wrapper daemon
 
@@ -52,3 +52,19 @@ wrapper-install: wrapper
 daemon-install: daemon
 	install -d $(DESTDIR)$(PREFIX)/bin
 	install -m 0755 daemon/mcpbridge-daemon $(DESTDIR)$(PREFIX)/bin/mcpbridge-daemon
+
+# Standing-invariants hook for `bullseye_convergence` / /cv.
+# Exit 0 = all invariants green; non-zero = at least one violation.
+# Test output is suppressed on success and shown on failure so the
+# bullseye summary stays readable.
+bullseye:
+	@cd daemon && go vet ./... && echo "✓ go vet"
+	@cd daemon && gofmt -l . | (! grep .) && echo "✓ gofmt"
+	@out=$$(mktemp); \
+	 if $(MAKE) -s test >$$out 2>&1; then \
+	   echo "✓ tests"; rm -f $$out; \
+	 else \
+	   echo "✗ tests"; cat $$out; rm -f $$out; exit 1; \
+	 fi
+	@test -z "$$(git status --porcelain)" && echo "✓ clean tree" || \
+	 (echo "✗ dirty tree"; git status --short; exit 1)
