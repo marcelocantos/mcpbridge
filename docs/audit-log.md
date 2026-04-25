@@ -5,6 +5,19 @@ Maintenance actions taken on this repo by `/audit`, `/docs`,
 the top. See `~/.claude/skills/audit-log-convention.md` for the
 format.
 
+## 2026-04-25 — /release v0.4.0
+
+- **Commit**: pending
+- **Outcome**: Shipped the unified-front-door rework (🎯T5). The
+  wrapper's CLI collapses to `mcpbridge connect <path>` regardless
+  of backend transport; backend type (stdio command+args vs HTTP
+  url) lives in the per-server config file alongside the existing
+  upgrade metadata. Config schema bumped v1 → v2. v0.3.0 argv
+  shapes (`-- COMMAND`, `--url URL`, `--config NAME`) are removed
+  and rejected with a one-line migration message. Pre-1.0
+  breaking change; documented in release notes and STABILITY.md.
+  STABILITY settling clock restart at 2026-04-25.
+
 ## 2026-04-22 — /release v0.3.0
 
 - **Commit**: `057f47d`
