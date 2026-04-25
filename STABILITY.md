@@ -4,7 +4,7 @@ mcpbridge is a pre-1.0 project. This document tracks the public
 interaction surface and what still needs to settle before a 1.0
 release.
 
-Snapshot as of: **v0.3.0**.
+Snapshot as of: **v0.4.0**.
 
 ## Stability commitment
 
@@ -23,18 +23,21 @@ settled vs. still under review vs. actively fluid.
 
 ### `mcpbridge` CLI (C wrapper)
 
-Flags — each entry shows default if any and current stability:
+Invocation: `mcpbridge [OPTIONS] connect <path>`.
 
-| Flag | Arg | Default | Stability |
+| Item | Arg | Default | Stability |
 |---|---|---|---|
-| `-- COMMAND [ARGS...]` | argv tail | one of `--` or `--url` is required | **stable** — tail-argv convention is non-negotiable for an MCP-client launched binary |
-| `--url URL` | string | — | **stable** — plain `http://` loopback URLs only in v1; https + remote hosts are rejected. Mutually exclusive with `-- COMMAND`. |
-| `--config NAME` | string | `basename(argv[1])` (stdio only; required for `--url`) | **needs review** — is tail-derived default good enough for `npx`/`uvx`/`python -m`? |
+| `connect <path>` | path to schema-v2 config file | required | **stable** — the single agent-facing form. `<path>` accepts `~`/`~user` expansion and absolute or cwd-relative forms. |
 | `--socket PATH` | string | `resolve_daemon_socket_path()` | **stable** |
 | `-v`, `--verbose` | — | off | **stable** |
 | `--version` | — | — | **stable** |
 | `--help`, `-h` | — | — | **stable** |
 | `--help-agent` | — | — | **stable** |
+
+Removed in v0.4.0 (vs v0.3.0): `-- COMMAND [ARGS...]`, `--url URL`,
+`--config NAME`. Each is rejected at startup with a one-line
+migration message pointing at the `connect <path>` form. Pre-1.0
+breakage; permitted.
 
 Exit codes: 0 on clean shutdown, 1 on fatal error, 2 on usage
 error. **stable**.
@@ -119,7 +122,7 @@ Known `status` values on `reload_ack`: `ok`, `drain_timeout`,
 
 **stable** — this is what 1.0 will commit to if shipped today.
 
-### Config schema v1 (per-server JSON)
+### Config schema v2 (per-server JSON)
 
 Authoritative reference: [`docs/config-schema.md`](docs/config-schema.md).
 
@@ -127,8 +130,11 @@ Envelope fields:
 
 | Field | Type | Required | Default | Stability |
 |---|---|---|---|---|
-| `schema` | int | yes | — | **stable** (v1) |
-| `name` | string | yes | — | **stable** |
+| `schema` | int | yes | — | **stable** (v2 — v1 is rejected with a migration message) |
+| `name` | string | yes | — | **stable** — identifier the wrapper sends to the daemon on registration; the file path is no longer constrained to match. |
+| `command` | string | one of `command`/`url` | — | **stable** — stdio backend; tilde-expanded at parse time. |
+| `args` | array of string | no | `[]` | **stable** — passed verbatim to `execvp`; no shell expansion. |
+| `url` | string | one of `command`/`url` | — | **stable** — plain `http://` loopback URLs only in v1 of the HTTP backend (`localhost` / `127.0.0.1` / `::1`); `https://` and remote hosts rejected. |
 | `source` | object | yes | — | **stable** (see per-type below) |
 | `upgrade` | `off`\|`notify`\|`auto` | no | `notify` | **stable** |
 | `check_interval` | Go duration | no | `1h` | **stable** |
@@ -184,13 +190,11 @@ These must be addressed before the v1.0.0 release can ship.
    config so the scheduler can learn the installed version by
    running a user-supplied command (e.g., `mnemo --version`).
 
-2. **Wrapper config name inference for wrapped launchers.** When
-   the wrapped server is launched via `npx @pkg/name`, `uvx pkg`,
-   or `python -m pkg`, the `basename(argv[1])` default resolves
-   to `npx` / `uvx` / `python` rather than the actual server
-   name. Current workaround is to pass `--config NAME`
-   explicitly. Before 1.0, decide whether this is documented-as-
-   required or whether we grow smarter inference.
+2. **Resolved as of v0.4.0** — config-driven `name`. The wrapper no
+   longer infers a name from the launch command; the config file's
+   `name` field is authoritative for registration. Wrapped launchers
+   like `npx @pkg/name` / `uvx pkg` / `python -m pkg` work without
+   special handling because the user names the config explicitly.
 
 3. **API surface continuity across reloads.** When the new child
    after a reload exposes a different surface than the old one,
@@ -241,13 +245,14 @@ These must be addressed before the v1.0.0 release can ship.
      urgent; the waste is a single refetch per reload.
 
 4. **HTTP backend scope is loopback + plain HTTP only.** The
-   wrapper supports both stdio and HTTP backends (🎯T3, landed
-   post-v0.2.0). The HTTP path accepts only plain `http://` to
-   loopback hosts (`localhost` / `127.0.0.1` / `::1`); `https://`
-   and remote hosts are rejected at launch. There is no standing
-   GET SSE stream — inbound notifications arrive via POST-response
-   SSE streams. Widening any of these (TLS, remote hosts, standing
-   GET SSE) is additive and can land post-1.0 without breaking
+   wrapper supports both stdio and HTTP backends (selected per
+   config file under v0.4.0's unified `connect <path>` form). The
+   HTTP path accepts only plain `http://` to loopback hosts
+   (`localhost` / `127.0.0.1` / `::1`); `https://` and remote hosts
+   are rejected at config-load time. There is no standing GET SSE
+   stream — inbound notifications arrive via POST-response SSE
+   streams. Widening any of these (TLS, remote hosts, standing GET
+   SSE) is additive and can land post-1.0 without breaking
    existing users.
 
 5. **No GitHub release publishing automation beyond what's
@@ -262,13 +267,13 @@ These must be addressed before the v1.0.0 release can ship.
    Go library in this repo was deleted on the assumption mnemo
    would be reworked to target the new wrapper. mnemo 0.20.0
    (2026-04-18) took a different path: it collapsed to a single
-   HTTP MCP daemon. Integration now happens via mcpbridge's HTTP
-   backend (🎯T3) rather than a dedicated wrapper-aware library
-   on mnemo's side. Smoke-verified against a live mnemo 0.21.0
-   during v0.3.0 prep: `mcpbridge --url http://localhost:19419/mcp
-   --config mnemo` completes initialize + tools/list end-to-end.
-   Not a 1.0 blocker; HTTP-backed flows need more real-world use
-   before the v0.3.0 scope can be declared settled.
+   HTTP MCP daemon. Integration happens via mcpbridge's HTTP
+   backend rather than a dedicated wrapper-aware library on
+   mnemo's side. Smoke-verified during v0.3.0 prep against a live
+   mnemo 0.21.0; under v0.4.0 the same setup works via a config
+   file with `"url": "http://localhost:19419/mcp"`. Not a 1.0
+   blocker; HTTP-backed flows still need more real-world use
+   before the scope can be declared settled.
 
 ## Out of scope for 1.0
 
@@ -299,9 +304,11 @@ bracket → **minimum 2 months settling period** before 1.0
 eligibility.
 
 Clock starts at the last additive change to the interaction
-surface that's material enough to warrant re-settling. v0.3.0
-adds the `--url URL` flag, the `MCPBRIDGE_BREW_PATH` env var, and
-the HTTP backend semantics — a meaningful expansion that restarts
-the clock at **2026-04-22**. Earliest 1.0 eligibility is therefore
-at least 2 months out from that date, assuming no further
-breaking or significantly-additive changes.
+surface that's material enough to warrant re-settling. v0.4.0
+restructures the wrapper's CLI into the unified `connect <path>`
+form, removes the v0.3.0 argv flags (`--`, `--url`, `--config`),
+and bumps the config schema to v2 with new `command`/`args`/`url`
+fields — a meaningful breaking change. Settling clock restarts at
+**2026-04-25**. Earliest 1.0 eligibility is therefore at least 2
+months out from that date, assuming no further breaking or
+significantly-additive changes.

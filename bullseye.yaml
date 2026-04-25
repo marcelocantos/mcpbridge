@@ -709,10 +709,11 @@ targets:
     achieved: 2026-04-22
   T5:
     name: Agent reaches every wrapped MCP server through a uniform `mcpbridge connect &lt;name&gt;` front door, regardless of backend transport
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     showcase: true
+    demonstration: 'Confirmed via `make test` — full suite passes (smoke, mcp, fsm, transport_stdio, transport_http, dispatch, daemon_client; e2e_wrapper, e2e_reload, e2e_http_reload all green) under the new unified front door. Verified the help text by hand: `./wrapper/mcpbridge --help` shows only `connect <path>`, and `./wrapper/mcpbridge --url http://x` prints the migration message and exits 2. Wrapper bridges both stdio (e2e_reload, fake_mcp child) and HTTP (e2e_http_reload, fake_http_mcp upstream) backends through the same `mcpbridge connect <config.json>` invocation; switching backends is a config-file edit, not a client-config edit.'
     acceptance:
     - 'The agent''s MCP client config form is identical across stdio and HTTP backends: `mcpbridge connect <name>` (or equivalent JSON `command`+`args` shape).'
     - Switching a server's backend type (stdio↔HTTP) requires only an edit to the daemon-side config; the agent's MCP client config does not change.
@@ -734,6 +735,7 @@ targets:
       This is a breaking change to v0.3.0's CLI. Pre-1.0; permitted. Migration notes go in release notes.
     origin: design discussion 2026-04-25 (supersedes earlier T5 attempt)
     discovered: 2026-04-25
+    achieved: 2026-04-25
   T5.1:
     name: Config schema v2 carries connection metadata alongside upgrade metadata
     status: achieved
@@ -815,7 +817,7 @@ targets:
     achieved: 2026-04-25
   T5.4:
     name: Docs reflect the unified `mcpbridge connect &lt;path&gt;` front door
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     showcase: true
@@ -842,3 +844,4 @@ targets:
     - T5.3
     origin: decomposition of 🎯T5
     discovered: 2026-04-25
+    achieved: 2026-04-25

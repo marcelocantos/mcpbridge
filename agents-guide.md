@@ -6,27 +6,32 @@ to know to install, configure, and troubleshoot it.
 
 ## What it is
 
-mcpbridge is a **transparent wrapper around MCP servers** that
-keeps an agent's MCP session alive across server upgrades. It
-solves one specific problem: upgrading a wrapped MCP server
-normally kills the agent's session, forcing a reconnect and
-losing whatever ephemeral state the agent was building up (open
-handles, cached initialize state, in-flight tool calls). With
-mcpbridge in front, an upgrade becomes a seamless backend cycle
-that the agent never observes.
+mcpbridge is a **transparent bridge for MCP servers** that keeps
+an agent's MCP session alive across server upgrades. It solves
+one specific problem: upgrading an MCP server normally kills the
+agent's session, forcing a reconnect and losing whatever ephemeral
+state the agent was building up (open handles, cached initialize
+state, in-flight tool calls). With mcpbridge in front, an upgrade
+becomes a seamless backend cycle that the agent never observes.
 
-The wrapped server can live on either transport:
+The agent always launches mcpbridge the same way:
 
-- **stdio**: the common case. mcpbridge fork/execs the server as
-  a child and bridges stdin/stdout.
-- **http**: a localhost MCP Streamable HTTP endpoint (plain
-  `http://localhost:PORT/path`). mcpbridge POSTs to it on behalf
-  of the agent and streams responses back. Used for servers that
-  are already long-running daemons themselves (e.g. mnemo).
+    mcpbridge connect <path-to-config-file>
 
-The agent always talks to mcpbridge on stdio regardless of which
-backend is in use. In both cases the wrapped server requires no
-modification and cannot tell it is being proxied.
+The config file describes how to reach the wrapped server —
+either:
+
+- **stdio**: a `command` + optional `args` that mcpbridge
+  fork/execs as a child.
+- **http**: a localhost MCP Streamable HTTP `url` that mcpbridge
+  POSTs to on behalf of the agent and streams responses back from.
+
+The agent always talks to mcpbridge over stdio regardless of
+which backend the wrapped server uses. Backend-transport changes
+(e.g., a server moving from stdio to HTTP at upgrade) are absorbed
+in the config file — the agent's launch command never changes.
+The wrapped server requires no modification and cannot tell it is
+being proxied.
 
 It's split into two processes:
 
@@ -37,10 +42,10 @@ It's split into two processes:
   daemon tells it to. Per session, lives and dies with the MCP
   client.
 - **`mcpbridge-daemon`** (Go) — one long-lived process per user
-  session, typically run under `brew services`. Reads per-server
-  JSON config files, polls upgrade sources (Homebrew formulas,
-  GitHub releases), performs upgrades, and tells connected
-  wrappers when to cycle their backends.
+  session, typically run under `brew services`. Reads the same
+  per-server config files, polls upgrade sources (Homebrew
+  formulas, GitHub releases), performs upgrades, and tells
+  connected wrappers when to cycle their backends.
 
 They talk over a user-local Unix domain socket. When the daemon
 isn't running, the wrapper still works — it just runs as a pure
@@ -93,17 +98,38 @@ socket file exists and is mode 0600.
 
 ### 3. Drop at least one per-server config
 
-The daemon does nothing until it has configs. Create
-`~/.config/mcpbridge/` and drop a JSON file there for each MCP
-server you want to wrap. Example for mnemo (a brew-installed MCP
-server):
+The config file is the single source of truth for both the wrapper
+(connection details) and the daemon (upgrade source). Create
+`~/.config/mcpbridge/` and drop one schema-v2 JSON file per MCP
+server.
+
+Stdio example (mnemo as a child process via brew):
 
 ```sh
 mkdir -p ~/.config/mcpbridge
 cat >~/.config/mcpbridge/mnemo.json <<'EOF'
 {
-  "schema": 1,
+  "schema": 2,
   "name": "mnemo",
+  "command": "/opt/homebrew/bin/mnemo",
+  "source": {
+    "type": "brew",
+    "formula": "marcelocantos/tap/mnemo"
+  },
+  "upgrade": "auto",
+  "check_interval": "30m"
+}
+EOF
+```
+
+HTTP example (mnemo as a localhost daemon):
+
+```sh
+cat >~/.config/mcpbridge/mnemo.json <<'EOF'
+{
+  "schema": 2,
+  "name": "mnemo",
+  "url": "http://localhost:19419/mcp",
   "source": {
     "type": "brew",
     "formula": "marcelocantos/tap/mnemo"
@@ -117,7 +143,8 @@ EOF
 Full schema reference: `docs/config-schema.md`. Supported source
 types: `brew` (for Homebrew formulas) and `github` (for binaries
 distributed as GitHub releases). Upgrade modes: `off` / `notify` /
-`auto` (default: `notify`).
+`auto` (default: `notify`). `command` is tilde-expanded; `args`
+are passed verbatim to `execvp`.
 
 Restart the daemon so it picks up new or changed configs:
 
@@ -127,55 +154,27 @@ brew services restart mcpbridge
 
 ### 4. Point your MCP client at mcpbridge
 
-Replace each MCP server entry in your client config with a call
-to `mcpbridge`. There are two forms, depending on how the wrapped
-server runs.
-
-**Stdio backend (spawn a child).** Pass the original command and
-its arguments after `--`:
+In your MCP client config, replace each MCP server entry with a
+call to `mcpbridge connect <path>`:
 
 ```json
 {
   "mcpServers": {
     "mnemo": {
       "command": "/opt/homebrew/bin/mcpbridge",
-      "args": ["--", "mnemo"]
+      "args": ["connect", "~/.config/mcpbridge/mnemo.json"]
     }
   }
 }
 ```
 
-The `--` separator marks where mcpbridge's own flags end and the
-wrapped command begins. Anything after `--` is forwarded verbatim
-as the child's argv:
+The config file's `command`/`url` field selects the backend
+transparently. Switching mnemo from a stdio backend to an HTTP
+backend (or vice versa) means editing the config file — the MCP
+client config does not change.
 
-```json
-"args": ["--", "mcp-foo", "--config", "/etc/foo.conf"]
-```
-
-**HTTP backend (connect to a localhost URL).** Pass `--url` and
-`--config`:
-
-```json
-{
-  "mcpServers": {
-    "mnemo": {
-      "command": "/opt/homebrew/bin/mcpbridge",
-      "args": [
-        "--url", "http://localhost:19419/mcp",
-        "--config", "mnemo"
-      ]
-    }
-  }
-}
-```
-
-v1 restrictions on `--url`:
-- Plain `http://` only. `https://` and remote hosts are rejected.
-- Host must be `localhost`, `127.0.0.1`, or `::1`.
-- `--config NAME` is required (no child command to derive a
-  default from).
-- `--url` and `-- COMMAND` are mutually exclusive.
+`<path>` may begin with `~` (home dir) or `~user` (named user's
+home dir), or be an absolute or cwd-relative path.
 
 **Restart the MCP client** so it picks up the new launch command.
 Until you do this, the MCP client is still spawning the old direct
@@ -211,10 +210,10 @@ INFO conn: registered name=mnemo child_pid=... child_binary=...
 ```
 
 If `name=` shows up but `config_found` is `false` in the
-corresponding log lines (verbose mode), the config file's `name`
-field doesn't match what the wrapper is registering as. Either
-fix the config file to match or pass `--config NAME` to the
-wrapper in the MCP client config.
+corresponding log lines (verbose mode), the registered name does
+not match any loaded config — check that the file's `name` field
+matches what the wrapper registers (which is the config's `name`,
+not the file path).
 
 ## Quick start prompt
 
@@ -225,12 +224,13 @@ Install mcpbridge from https://github.com/marcelocantos/mcpbridge:
 
   1. `brew tap marcelocantos/tap && brew install mcpbridge`
   2. `brew services start mcpbridge`
-  3. Drop `~/.config/mcpbridge/mnemo.json` (or whichever server)
-     per the schema in docs/config-schema.md
+  3. Drop `~/.config/mcpbridge/<name>.json` per the schema in
+     docs/config-schema.md, for each MCP server you want to wrap.
+     The file describes the connection (command/args or url) AND
+     the upgrade source.
   4. Edit the MCP client config so each wrapped server's command
-     becomes `mcpbridge -- <original command>` (stdio backend) or
-     `mcpbridge --url http://localhost:PORT/path --config NAME`
-     (HTTP backend) — then restart the client.
+     becomes `mcpbridge connect ~/.config/mcpbridge/<name>.json`.
+     Then restart the client.
 
   Installation is NOT complete until step 4 has run and the MCP
   client has been restarted. Verify by calling a tool on the
@@ -245,16 +245,10 @@ Install mcpbridge from https://github.com/marcelocantos/mcpbridge:
 ### `mcpbridge` (the wrapper)
 
 ```
-Usage: mcpbridge [OPTIONS] -- COMMAND [ARGS...]
-       mcpbridge --url URL --config NAME [OPTIONS]
+Usage: mcpbridge [OPTIONS] connect <path>
 
 Options:
-  --config NAME    config name for daemon registration.
-                   Default for stdio: basename of COMMAND.
-                   Required for --url (no default available).
   --socket PATH    override daemon socket path
-  --url URL        use an HTTP MCP backend instead of spawning a child.
-                   Mutually exclusive with the `-- COMMAND` form.
   -v, --verbose    extra logging to stderr
   --version        print version and exit
   --help           print this help and exit
@@ -265,9 +259,10 @@ One `mcpbridge` process is launched per wrapped MCP server by the
 MCP client. It stays alive for the duration of the agent session.
 It is not a daemon and is not started manually.
 
-For `--url`, v1 accepts only plain `http://` to loopback hosts
-(`localhost` / `127.0.0.1` / `::1`). https and remote hosts are
-rejected at launch.
+`<path>` may begin with `~` (home dir) or `~user`, or be an
+absolute or cwd-relative path. The file at `<path>` must be a
+schema-v2 config with exactly one of `command` (stdio) or `url`
+(http) set.
 
 ### `mcpbridge-daemon`
 
@@ -291,23 +286,35 @@ without waiting for a real upgrade.
 
 ## Config schema at a glance
 
-Full reference: `docs/config-schema.md`. Short form:
+Full reference: `docs/config-schema.md`. Short form (stdio):
 
 ```json
 {
-  "schema": 1,
+  "schema": 2,
   "name": "mnemo",
+  "command": "/opt/homebrew/bin/mnemo",
   "source": { "type": "brew", "formula": "marcelocantos/tap/mnemo" },
   "upgrade": "notify",
   "check_interval": "1h"
 }
 ```
 
-- `name` **must** match what the wrapper registers as. For stdio,
-  the default is `basename(argv[1])` (the wrapped command); for
-  `--url`, `--config NAME` is required and becomes the registered
-  name directly. Either way, passing `--config NAME` explicitly
-  overrides any default.
+Or HTTP:
+
+```json
+{
+  "schema": 2,
+  "name": "mnemo",
+  "url": "http://localhost:19419/mcp",
+  "source": { "type": "brew", "formula": "marcelocantos/tap/mnemo" },
+  "upgrade": "notify"
+}
+```
+
+- Exactly one of `command` (with optional `args`) or `url` is
+  required. The wrapper picks the backend based on which is set.
+- `name` is the identifier the wrapper sends to the daemon on
+  registration; it must be unique across all loaded configs.
 - `upgrade` defaults to `notify` (detect + log, don't install).
   Use `auto` to let the daemon drive the install. `off` disables
   polling for that server.
@@ -320,19 +327,16 @@ Full reference: `docs/config-schema.md`. Short form:
 isn't running. `brew services start mcpbridge`, or run
 `mcpbridge-daemon -v` in the foreground to see startup errors.
 
+**The wrapper exits immediately with "schema v1 is not supported".**
+You have an old v0.3.0 config file. Edit it: set `"schema": 2` and
+add a `"command": "..."` (or `"url": "..."`) field describing the
+connection. See `docs/config-schema.md` for the migration recipe.
+
 **The wrapper registers but `reload` never arrives.** Check
 `config_found` / `polling` in register_ok. If either is false,
 the config name doesn't match, the config file failed to parse,
 or the upgrade mode is `off`. Check
 `$(brew --prefix)/var/log/mcpbridge-daemon.log` for parse errors.
-
-**A wrapped server is named something the daemon can't infer.**
-Pass `--config NAME` before the `--` separator in the MCP client
-config:
-
-```json
-"args": ["--config", "mnemo", "--", "/path/to/different-binary"]
-```
 
 **The agent sees an initialize failure after a reload.** The
 wrapped server is broken in a way that the daemon-driven upgrade
@@ -349,7 +353,7 @@ problem.
   via `brew services`. A wrapper that can't reach the daemon runs
   as a plain bridge with no upgrade handling.
 - **It is not itself an MCP server.** Registering `mcpbridge` in
-  your MCP client config without a `-- COMMAND` after it does
+  your MCP client config without a `connect <path>` after it does
   nothing useful.
 - **It does not speak HTTP on its socket.** The daemon's UDS uses
   newline-delimited JSON envelopes. Agents that reflexively try
@@ -377,8 +381,8 @@ problem.
   triggers only when that value changes. If you need an immediate
   upgrade, `SIGHUP` the daemon after the next real release, or
   run `brew upgrade` yourself and let fsnotify pick up the change.
-- **Wire protocol v1 vs. schema v1 are independent**. The
+- **Wire protocol v1 vs. config schema v2 are independent**. The
   daemon↔wrapper UDS protocol has its own schema version
   (`v: 1` in envelopes). The per-server JSON config files have
-  their own schema version (`"schema": 1`). They're bumped
+  their own schema version (`"schema": 2`). They're bumped
   independently.
