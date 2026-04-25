@@ -41,7 +41,8 @@ CORE_SRCS  = \
     src/transport_stdio.c \
     src/transport_http.c \
     src/dispatch.c \
-    src/daemon_client.c
+    src/daemon_client.c \
+    src/config.c
 
 MAIN_SRCS  = src/main.c $(CORE_SRCS) $(WATCH_SRC)
 CJSON_SRCS = vendor/cjson/cJSON.c

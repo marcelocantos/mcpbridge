@@ -6,21 +6,29 @@
  * Wires the pure modules (parser, FSM, dispatch, transport) and the
  * daemon client into a runnable binary.
  *
- * Integration scope:
- *   - Two backend transports: stdio (fork/exec a child) and http
- *     (localhost MCP Streamable HTTP). Selected via `-- COMMAND` or
- *     `--url URL` respectively; mutually exclusive.
- *   - Daemon connection is best-effort: if the daemon is absent the
- *     wrapper still works as a transparent proxy and periodically
- *     tries to reconnect in the background with 1s -> 5s backoff.
- *   - RELOAD notifications from the daemon drive the full
- *     DRAINING -> SWAPPING -> backend cycle -> cached-initialize
- *     replay -> RUNNING -> reload_ack cycle. For stdio, "backend
- *     cycle" is a child respawn; for http, it is session-id reset
- *     + re-dial on the next POST.
- *   - Shutdown is clean on upstream EOF, SIGINT, SIGTERM, or an FSM
- *     FAILED transition. */
+ * Invocation:
+ *
+ *   mcpbridge [OPTIONS] connect <path>
+ *
+ * <path> is a per-server config file (schema v2) describing how to
+ * reach the wrapped MCP server. The wrapper reads the file, picks
+ * the backend based on which connection field is set:
+ *   - "command"+"args": stdio backend (fork/exec a child)
+ *   - "url"            : http backend (localhost MCP Streamable HTTP)
+ *
+ * Daemon connection is best-effort: if the daemon is absent the
+ * wrapper still works as a transparent proxy and periodically tries
+ * to reconnect in the background with 1s -> 5s backoff. RELOAD
+ * notifications from the daemon drive a full
+ * DRAINING -> SWAPPING -> backend cycle -> cached-initialize replay
+ * -> RUNNING -> reload_ack cycle. For stdio, "backend cycle" is a
+ * child respawn; for http, it is session-id reset + re-dial on the
+ * next POST.
+ *
+ * Shutdown is clean on upstream EOF, SIGINT, SIGTERM, or an FSM
+ * FAILED transition. */
 
+#include "config.h"
 #include "daemon_client.h"
 #include "dispatch.h"
 #include "fsm.h"
@@ -33,7 +41,6 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <libgen.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
@@ -47,25 +54,19 @@
 /* ---------- Help text ---------- */
 
 static const char usage_text[] =
-    "Usage: mcpbridge [OPTIONS] -- COMMAND [ARGS...]\n"
-    "       mcpbridge --url URL --config NAME [OPTIONS]\n"
+    "Usage: mcpbridge [OPTIONS] connect <path>\n"
     "\n"
-    "Wrap an MCP server and keep its session alive across upgrades.\n"
+    "Bring up the wrapped MCP server described by the schema-v2\n"
+    "config file at <path>, and keep its session alive across\n"
+    "upgrades. The agent always talks to mcpbridge over stdio; the\n"
+    "backend (stdio child or localhost HTTP MCP endpoint) is\n"
+    "determined by the config file.\n"
     "\n"
-    "Two backend forms:\n"
-    "  stdio:  spawn COMMAND [ARGS...] as a child after `--`.\n"
-    "  http:   connect to an MCP Streamable HTTP endpoint via --url.\n"
-    "          URL must be http://host[:port]/path with host one of\n"
-    "          localhost / 127.0.0.1 / ::1. https and remote hosts are\n"
-    "          rejected in v1.\n"
+    "<path> may begin with `~` (home dir) or `~user` (named user's\n"
+    "home dir), or be relative to the current directory.\n"
     "\n"
     "Options:\n"
-    "  --config NAME    config name for daemon registration.\n"
-    "                   Default for stdio: basename of COMMAND.\n"
-    "                   Required for --url (no default available).\n"
     "  --socket PATH    override daemon socket path\n"
-    "  --url URL        use an HTTP MCP backend instead of spawning a child.\n"
-    "                   Mutually exclusive with the `-- COMMAND` form.\n"
     "  -v, --verbose    extra logging to stderr\n"
     "  --version        print version and exit\n"
     "  --help           print this help and exit\n"
@@ -74,31 +75,26 @@ static const char usage_text[] =
 static const char agent_help_text[] =
     "mcpbridge " MCPBRIDGE_VERSION "\n"
     "\n"
-    "Transparently wraps an MCP server. The agent always talks to\n"
-    "mcpbridge over stdio; the backend the wrapped server lives on\n"
-    "can be either stdio (a child process) or HTTP (a localhost\n"
-    "MCP Streamable HTTP endpoint).\n"
+    "Transparently bridges an MCP server. The agent talks to\n"
+    "mcpbridge over stdio; mcpbridge reads the config file at <path>\n"
+    "and bridges to either a stdio child (config has \"command\") or\n"
+    "a localhost MCP Streamable HTTP endpoint (config has \"url\").\n"
     "\n"
-    "Stdio backend — spawn a child:\n"
-    "\n"
-    "  { \"command\": \"mcpbridge\",\n"
-    "    \"args\": [\"--\", \"real-mcp-server\", \"--some-flag\"] }\n"
-    "\n"
-    "HTTP backend — connect to a localhost URL:\n"
+    "MCP client config:\n"
     "\n"
     "  { \"command\": \"mcpbridge\",\n"
-    "    \"args\": [\"--url\", \"http://localhost:19419/mcp\",\n"
-    "             \"--config\", \"real-mcp-server\"] }\n"
+    "    \"args\": [\"connect\", \"~/.config/mcpbridge/<name>.json\"] }\n"
     "\n"
-    "For HTTP, v1 accepts plain http:// to localhost / 127.0.0.1 /\n"
-    "::1 only. https and remote hosts are rejected; --config NAME is\n"
-    "required because there is no child command to derive a default\n"
-    "from.\n"
+    "The config file's contents determine the backend transparently;\n"
+    "the agent's launch command never changes when a server's\n"
+    "backend type changes.\n"
     "\n"
-    "Either way, mcpbridge bridges the session and cycles the backend\n"
-    "when mcpbridge-daemon tells it a newer version is installed —\n"
+    "mcpbridge bridges the session and cycles the backend when\n"
+    "mcpbridge-daemon tells it a newer version is installed —\n"
     "invisibly to the agent's MCP session. The wrapped server is not\n"
-    "aware of mcpbridge and requires no modification.\n";
+    "aware of mcpbridge and requires no modification.\n"
+    "\n"
+    "See docs/config-schema.md for the file format.\n";
 
 /* ---------- Signal handling ---------- */
 
@@ -653,116 +649,99 @@ static int run_loop(struct loop_ctx *ctx) {
 
 /* ---------- argv parsing ---------- */
 
-static int split_child_argv(int argc, char **argv,
-                            const char **cmd, char ***cmd_argv) {
-    for (int i = 1; i < argc; i++) {
-        if (str_eq(argv[i], "--")) {
-            if (i + 1 >= argc) {
-                return -1;
-            }
-            *cmd      = argv[i + 1];
-            *cmd_argv = &argv[i + 1];
-            return 0;
-        }
-    }
-    return -1;
-}
-
-/* Derive a default config name from the child's command. Returns a
- * pointer into a static buffer, or NULL if the command is NULL. */
-static const char *default_config_name(const char *cmd) {
-    static char buf[NAME_MAX + 1];
-    if (cmd == NULL) {
-        return NULL;
-    }
-    snprintf(buf, sizeof(buf), "%s", cmd);
-    char *base = basename(buf);
-    /* basename may modify its argument and return either the static
-     * buffer or a pointer into it, depending on platform. Copy to a
-     * fresh static buffer to be safe. */
-    static char out[NAME_MAX + 1];
-    snprintf(out, sizeof(out), "%s", base);
-    return out;
+/* migration_die prints a one-line migration message for an obsolete
+ * v0.3.0 flag and exits non-zero. */
+static void migration_die(const char *flag) {
+    fprintf(stderr,
+            "mcpbridge: %s is no longer supported. Use\n"
+            "  mcpbridge connect <path-to-config-file>\n"
+            "and put the connection details in the config file. See\n"
+            "docs/config-schema.md.\n",
+            flag);
+    exit(2);
 }
 
 int main(int argc, char **argv) {
-    const char *cli_sock   = NULL;
-    const char *cli_config = NULL;
-    const char *cli_url    = NULL;
+    const char *cli_sock = NULL;
+    const char *cfg_path = NULL;
 
-    /* Options pass. Stops at the first `--`. */
-    for (int i = 1; i < argc; i++) {
-        if (str_eq(argv[i], "--version")) {
+    int i = 1;
+    /* Top-level options. Stop on `connect`. */
+    while (i < argc) {
+        const char *a = argv[i];
+        if (str_eq(a, "--version")) {
             puts(MCPBRIDGE_VERSION);
             return 0;
         }
-        if (str_eq(argv[i], "--help") || str_eq(argv[i], "-h")) {
+        if (str_eq(a, "--help") || str_eq(a, "-h")) {
             fputs(usage_text, stdout);
             return 0;
         }
-        if (str_eq(argv[i], "--help-agent")) {
+        if (str_eq(a, "--help-agent")) {
             fputs(agent_help_text, stdout);
             return 0;
         }
-        if (str_eq(argv[i], "-v") || str_eq(argv[i], "--verbose")) {
+        if (str_eq(a, "-v") || str_eq(a, "--verbose")) {
             log_set_level(LOG_DEBUG);
+            i++;
             continue;
         }
-        if (str_eq(argv[i], "--socket")) {
+        if (str_eq(a, "--socket")) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "mcpbridge: --socket requires an argument\n");
                 return 2;
             }
-            cli_sock = argv[++i];
+            cli_sock = argv[i + 1];
+            i += 2;
             continue;
         }
-        if (str_eq(argv[i], "--config")) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "mcpbridge: --config requires an argument\n");
-                return 2;
-            }
-            cli_config = argv[++i];
-            continue;
+        if (str_eq(a, "--")) {
+            migration_die("`-- COMMAND`");
         }
-        if (str_eq(argv[i], "--url")) {
-            if (i + 1 >= argc) {
-                fprintf(stderr, "mcpbridge: --url requires an argument\n");
-                return 2;
-            }
-            cli_url = argv[++i];
-            continue;
+        if (str_eq(a, "--url") || str_has_prefix(a, "--url=")) {
+            migration_die("--url URL");
         }
-        if (str_eq(argv[i], "--")) {
+        if (str_eq(a, "--config") || str_has_prefix(a, "--config=")) {
+            migration_die("--config NAME");
+        }
+        if (str_eq(a, "connect")) {
+            i++;
             break;
         }
-        if (str_has_prefix(argv[i], "-")) {
-            fprintf(stderr, "mcpbridge: unknown option: %s\n", argv[i]);
+        if (str_has_prefix(a, "-")) {
+            fprintf(stderr, "mcpbridge: unknown option: %s\n", a);
             fputs(usage_text, stderr);
             return 2;
         }
-    }
-
-    /* Backend selection. Exactly one of `-- COMMAND` or `--url URL`
-     * must be given. */
-    const char *cmd = NULL;
-    char      **cmd_argv = NULL;
-    int have_cmd = (split_child_argv(argc, argv, &cmd, &cmd_argv) == 0);
-
-    if (cli_url != NULL && have_cmd) {
+        /* Bare positional before `connect` is a usage error — the
+         * subcommand is mandatory. */
         fprintf(stderr,
-                "mcpbridge: --url and `-- COMMAND` are mutually exclusive\n");
+                "mcpbridge: unknown subcommand %s (expected `connect`)\n", a);
         fputs(usage_text, stderr);
         return 2;
     }
-    if (cli_url == NULL && !have_cmd) {
+
+    /* Path argument for `connect`. */
+    if (i >= argc) {
         fputs(usage_text, stderr);
         return 2;
     }
-    if (cli_url != NULL && cli_config == NULL) {
-        fprintf(stderr,
-                "mcpbridge: --config NAME is required when using --url "
-                "(no child command to derive a default from)\n");
+    cfg_path = argv[i++];
+    if (i < argc) {
+        fprintf(stderr, "mcpbridge: trailing arguments after <path>\n");
+        fputs(usage_text, stderr);
         return 2;
+    }
+
+    /* Resolve `~`/`~user` in the path. */
+    char *expanded_path = expand_tilde(cfg_path);
+    if (expanded_path == NULL) {
+        return 1;
+    }
+    struct config *cfg = config_load(expanded_path);
+    free(expanded_path);
+    if (cfg == NULL) {
+        return 1;
     }
 
     install_signal_handlers();
@@ -775,26 +754,37 @@ int main(int argc, char **argv) {
 
     struct transport *t;
     const char       *child_bin;
-    if (cli_url != NULL) {
-        t = transport_http_new(cli_url);
-        if (t == NULL) {
-            log_error("transport_http_new(%s) failed: %s",
-                      cli_url, strerror(errno));
-            return 1;
-        }
-        child_bin = cli_url;
-    } else {
-        t = transport_stdio_new(cmd, cmd_argv);
+    switch (cfg->backend) {
+    case CONFIG_BACKEND_STDIO:
+        t = transport_stdio_new(cfg->command, cfg->args);
         if (t == NULL) {
             log_error("transport_stdio_new failed");
+            config_free(cfg);
             return 1;
         }
-        child_bin = cmd;
+        child_bin = cfg->command;
+        break;
+    case CONFIG_BACKEND_HTTP:
+        t = transport_http_new(cfg->url);
+        if (t == NULL) {
+            log_error("transport_http_new(%s) failed: %s",
+                      cfg->url, strerror(errno));
+            config_free(cfg);
+            return 1;
+        }
+        child_bin = cfg->url;
+        break;
+    default:
+        log_error("invalid config backend %d (this should not happen)",
+                  cfg->backend);
+        config_free(cfg);
+        return 1;
     }
 
     if (transport_start(t) != 0) {
         log_error("transport_start failed: %s", strerror(errno));
         transport_destroy(t);
+        config_free(cfg);
         return 1;
     }
 
@@ -806,9 +796,7 @@ int main(int argc, char **argv) {
         .fsm                = &fsm,
         .dispatch           = NULL,
         .daemon             = NULL,
-        .config_name        = cli_config != NULL
-                               ? cli_config
-                               : default_config_name(cmd),
+        .config_name        = cfg->name,
         .sock_path          = resolve_daemon_socket_path(cli_sock),
         .child_bin          = child_bin,
         .pending_reload_seq = 0,
@@ -827,6 +815,7 @@ int main(int argc, char **argv) {
         log_error("dispatch_new failed");
         transport_stop(t);
         transport_destroy(t);
+        config_free(cfg);
         return 1;
     }
     ctx.dispatch = d;
@@ -850,5 +839,6 @@ int main(int argc, char **argv) {
     transport_stop(t);
     dispatch_free(d);
     transport_destroy(t);
+    config_free(cfg);
     return rc;
 }

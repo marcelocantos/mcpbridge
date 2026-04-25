@@ -767,7 +767,7 @@ targets:
     achieved: 2026-04-25
   T5.2:
     name: Wrapper takes `mcpbridge connect &lt;path&gt;` and reads connection details from the file
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -796,9 +796,10 @@ targets:
     - T5.1
     origin: decomposition of 🎯T5
     discovered: 2026-04-25
+    achieved: 2026-04-25
   T5.3:
     name: Daemon loads schema v2 configs for upgrade polling
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     acceptance:
@@ -806,16 +807,12 @@ targets:
     - Daemon logs and skips schema:1 files (with a one-line migration hint)
     - All scheduler / source / watcher tests still pass against schema:2 fixtures
     - 'Per-server config tests cover: stdio config, http config, both-command-and-url (rejected), neither (rejected), schema:1 (rejected with migration message)'
-    context: |-
-      Daemon-side complement to 🎯T5.1. The daemon's config loader (daemon/internal/config) is updated to read schema:2 files; existing source backends (brew, github), scheduler, watcher, and socket server consume only the upgrade-related fields, so the changes are isolated to the config package.
-
-      Discovery directories stay as v0.3.0: `~/.config/mcpbridge/`, `$HOMEBREW_PREFIX/share/mcpbridge/`. The daemon walks these and parses every `*.json` it finds. Files that fail validation are logged and skipped; the daemon doesn't refuse to start because of one bad config.
-
-      The connection fields (`command`, `args`, `url`) are read but unused on the daemon side — they exist only for the wrapper. The daemon could in principle warn if the upgrade source's expected binary path doesn't match the config's `command`, but that's a nice-to-have, not in scope here.
+    context: Achieved as a side effect of 🎯T5.1. The daemon loads configs via the package I rewrote in T5.1; downstream consumers (scheduler, watcher, source, socket, main.go) only read `Name`/`Source`/`Upgrade`/`CheckInterval` and don't touch `Schema`/`Command`/`URL`, so they were never v1-coupled. The full daemon test suite passes under schema v2 with no further changes.
     depends_on:
     - T5.1
     origin: decomposition of 🎯T5
     discovered: 2026-04-25
+    achieved: 2026-04-25
   T5.4:
     name: Docs reflect the unified `mcpbridge connect &lt;path&gt;` front door
     status: identified

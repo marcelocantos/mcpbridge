@@ -45,6 +45,7 @@ DAEMON_ERR=$(mktemp -t mcpbridge-http-reload.XXXXXX)
 SERVER_OUT=$(mktemp -t mcpbridge-http-reload.XXXXXX)
 SERVER_ERR=$(mktemp -t mcpbridge-http-reload.XXXXXX)
 INPUT_FIFO=$(mktemp -u -t mcpbridge-http-reload.XXXXXX)
+CONFIG_FILE=$(mktemp -t mcpbridge-http-reload.XXXXXX.json)
 mkfifo "$INPUT_FIFO"
 
 cleanup() {
@@ -53,10 +54,10 @@ cleanup() {
     [ -n "${SERVER_PID:-}" ]  && kill -TERM "$SERVER_PID"  2>/dev/null || true
     wait 2>/dev/null || true
     if [ "${MCPBRIDGE_KEEP_E2E_LOGS:-}" = "1" ]; then
-        echo "http reload e2e: logs preserved at $WRAPPER_OUT $WRAPPER_ERR $DAEMON_ERR $SERVER_OUT $SERVER_ERR" >&2
+        echo "http reload e2e: logs preserved at $WRAPPER_OUT $WRAPPER_ERR $DAEMON_ERR $SERVER_OUT $SERVER_ERR $CONFIG_FILE" >&2
         return
     fi
-    rm -f "$WRAPPER_OUT" "$WRAPPER_ERR" "$DAEMON_ERR" "$SERVER_OUT" "$SERVER_ERR" "$INPUT_FIFO" "$SOCK"
+    rm -f "$WRAPPER_OUT" "$WRAPPER_ERR" "$DAEMON_ERR" "$SERVER_OUT" "$SERVER_ERR" "$INPUT_FIFO" "$SOCK" "$CONFIG_FILE"
 }
 trap cleanup EXIT
 
@@ -102,9 +103,18 @@ if [ ! -S "$SOCK" ]; then
     exit 1
 fi
 
-# Start the wrapper in HTTP mode.
-MCPBRIDGE_SOCKET="$SOCK" "$WRAPPER" -v \
-    --url "$URL" --config fake-http-mcp \
+# Build a schema:2 config pointing at the fake HTTP server.
+cat >"$CONFIG_FILE" <<EOF
+{
+  "schema": 2,
+  "name": "fake-http-mcp",
+  "url": "$URL",
+  "source": {"type": "brew", "formula": "x/y/fake-http-mcp"}
+}
+EOF
+
+# Start the wrapper in HTTP mode (backend selected by the config file).
+MCPBRIDGE_SOCKET="$SOCK" "$WRAPPER" -v connect "$CONFIG_FILE" \
     <"$INPUT_FIFO" >"$WRAPPER_OUT" 2>"$WRAPPER_ERR" &
 WRAPPER_PID=$!
 

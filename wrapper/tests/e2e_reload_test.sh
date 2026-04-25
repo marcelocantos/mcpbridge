@@ -44,7 +44,19 @@ WRAPPER_OUT=$(mktemp -t mcpbridge-reload.XXXXXX)
 WRAPPER_ERR=$(mktemp -t mcpbridge-reload.XXXXXX)
 DAEMON_ERR=$(mktemp -t mcpbridge-reload.XXXXXX)
 INPUT_FIFO=$(mktemp -u -t mcpbridge-reload.XXXXXX)
+CONFIG_FILE=$(mktemp -t mcpbridge-reload.XXXXXX.json)
 mkfifo "$INPUT_FIFO"
+
+# Build a schema:2 stdio config pointing at fake_mcp.
+CHILD_ABS=$(cd "$(dirname "$CHILD")" && pwd)/$(basename "$CHILD")
+cat >"$CONFIG_FILE" <<EOF
+{
+  "schema": 2,
+  "name": "fake-mcp",
+  "command": "$CHILD_ABS",
+  "source": {"type": "brew", "formula": "x/y/fake-mcp"}
+}
+EOF
 
 cleanup() {
     [ -n "${WRAPPER_PID:-}" ] && kill -TERM "$WRAPPER_PID" 2>/dev/null || true
@@ -54,7 +66,7 @@ cleanup() {
         echo "reload e2e: logs preserved at $WRAPPER_OUT $WRAPPER_ERR $DAEMON_ERR" >&2
         return
     fi
-    rm -f "$WRAPPER_OUT" "$WRAPPER_ERR" "$DAEMON_ERR" "$INPUT_FIFO" "$SOCK"
+    rm -f "$WRAPPER_OUT" "$WRAPPER_ERR" "$DAEMON_ERR" "$INPUT_FIFO" "$SOCK" "$CONFIG_FILE"
 }
 trap cleanup EXIT
 
@@ -78,7 +90,7 @@ fi
 # Start the wrapper reading from the FIFO and writing to WRAPPER_OUT.
 # The FIFO lets us hold stdin open while driving the session from
 # several shell commands with a sleep between them.
-MCPBRIDGE_SOCKET="$SOCK" "$WRAPPER" -v -- "$CHILD" \
+MCPBRIDGE_SOCKET="$SOCK" "$WRAPPER" -v connect "$CONFIG_FILE" \
     <"$INPUT_FIFO" >"$WRAPPER_OUT" 2>"$WRAPPER_ERR" &
 WRAPPER_PID=$!
 

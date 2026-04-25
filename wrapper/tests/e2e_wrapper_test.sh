@@ -27,7 +27,20 @@ fi
 
 OUT=$(mktemp -t mcpbridge-e2e.XXXXXX)
 ERR=$(mktemp -t mcpbridge-e2e.XXXXXX)
-trap 'rm -f "$OUT" "$ERR"' EXIT
+CFG=$(mktemp -t mcpbridge-e2e.XXXXXX.json)
+trap 'rm -f "$OUT" "$ERR" "$CFG"' EXIT
+
+# Build a schema:2 stdio config pointing at fake_mcp. Brew/source is
+# present for daemon validation but irrelevant here — no daemon runs.
+CHILD_ABS=$(cd "$(dirname "$CHILD")" && pwd)/$(basename "$CHILD")
+cat >"$CFG" <<EOF
+{
+  "schema": 2,
+  "name": "fake-mcp",
+  "command": "$CHILD_ABS",
+  "source": {"type": "brew", "formula": "x/y/fake-mcp"}
+}
+EOF
 
 INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"1"}}}'
 INITED='{"jsonrpc":"2.0","method":"notifications/initialized"}'
@@ -41,7 +54,7 @@ LIST='{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
     printf '%s\n' "$INITED"
     printf '%s\n' "$LIST"
     sleep 1.0
-} | "$BIN" -- "$CHILD" >"$OUT" 2>"$ERR" || {
+} | "$BIN" connect "$CFG" >"$OUT" 2>"$ERR" || {
     echo "e2e: wrapper exited non-zero" >&2
     cat "$ERR" >&2
     exit 1
