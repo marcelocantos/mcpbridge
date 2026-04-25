@@ -88,11 +88,11 @@ func main() {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usageText) }
 
 	var (
-		showVersion    bool
-		showHelp       bool
-		showHelpAgent  bool
-		verbose        bool
-		sockPath       string
+		showVersion   bool
+		showHelp      bool
+		showHelpAgent bool
+		verbose       bool
+		sockPath      string
 	)
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	fs.BoolVar(&showHelp, "help", false, "print help and exit")

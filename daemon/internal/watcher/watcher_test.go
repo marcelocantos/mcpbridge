@@ -14,10 +14,10 @@ import (
 )
 
 type fakeBcast struct {
-	mu          sync.Mutex
-	count       atomic.Int64
-	lastName    string
-	lastReason  string
+	mu         sync.Mutex
+	count      atomic.Int64
+	lastName   string
+	lastReason string
 }
 
 func (f *fakeBcast) ReloadName(name, reason string) int {
