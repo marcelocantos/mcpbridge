@@ -5,6 +5,23 @@ Maintenance actions taken on this repo by `/audit`, `/docs`,
 the top. See `~/.claude/skills/audit-log-convention.md` for the
 format.
 
+## 2026-04-26 — /release v0.5.0
+
+- **Commit**: `pending`
+- **Outcome**: Internal-hardening release — no public surface
+  changes. Adds the `make bullseye` standing-invariants hook (#10)
+  so `/cv` and `bullseye_convergence` gate target work on `go vet`
+  + `gofmt` + `make test` + clean-tree. Bumps the daemon-socket
+  wait in `daemon_client_test`, `e2e_reload_test.sh`, and
+  `e2e_http_reload_test.sh` from 2s to 5s, eliminating a transient
+  flake where a fresh fork+exec of the Go daemon binary
+  occasionally exceeded the budget under load. Raises 🎯T6
+  (defensive client-side keepalive ping for the HTTP transport,
+  reset-on-any-frame) — identified, not yet implemented; will
+  benefit mnemo, sawmill, spyder, and any third-party HTTP MCP
+  upstream when it lands. STABILITY.md snapshot bumped to v0.5.0;
+  settling clock unchanged (still 2026-04-25, no surface change).
+
 ## 2026-04-25 — /release v0.4.0
 
 - **Commit**: `7818a50`

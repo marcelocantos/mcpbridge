@@ -74,9 +74,9 @@ trap cleanup EXIT
 MCPBRIDGE_SOCKET="$SOCK" "$DAEMON" -v 2>"$DAEMON_ERR" &
 DAEMON_PID=$!
 
-# Wait up to 2s for the socket to appear.
+# Wait up to 5s for the socket to appear.
 i=0
-while [ $i -lt 40 ]; do
+while [ $i -lt 100 ]; do
     [ -S "$SOCK" ] && break
     i=$((i+1))
     sleep 0.05

@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 targets:
   T1:
     name: A generic C wrapper transparently proxies any stdio MCP server with automatic upgrade detection and execution, keeping the agent's MCP session alive across child restarts.
@@ -845,3 +845,21 @@ targets:
     origin: decomposition of 🎯T5
     discovered: 2026-04-25
     achieved: 2026-04-25
+  T6:
+    name: mcpbridge HTTP transport sends defensive client-side keepalive pings to its upstream when the server falls silent
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - wrapper/src/transport_http.c sends a JSON-RPC 'ping' request to the upstream URL on a configurable timer (default ~35-40s — slightly longer than the typical mcp-go server-side WithHeartbeatInterval of 30s)
+    - The timer is reset whenever ANY frame is received from the upstream (tool response, SSE event, server-initiated notification) — so a server that already heartbeats correctly never triggers an mcpbridge ping
+    - Ping failures are logged but do NOT tear down the upstream session — they're best-effort liveness probes, not health checks
+    - Setting the interval to 0 (or a config-level 'disable') turns the feature off entirely
+    - An end-to-end test idles the upstream for 5+ minutes and verifies the transport stays usable when the upstream lacks server-side heartbeats
+    context: 'mark3labs/mcp-go''s StreamableHTTPServer ships with WithHeartbeatInterval disabled by default; lots of HTTP MCP servers in the wild (and ones we don''t own) inherit this footgun, so a Claude Code session that idles ~3 minutes hits ''MCP error -32000: Connection closed'' on the next tool call. We can fix every server we own (mnemo, sawmill, spyder), but a defensive ping inside mcpbridge closes the gap for any HTTP upstream — owned or third-party — without needing each server author to opt in. Reset-on-any-frame means a well-behaved server (with its own heartbeat or just busy traffic) suppresses our ping in the common case, so the cost is ~zero in normal operation. Slightly-longer-than-server-default interval means we yield to the server when both are configured, only kicking in when the server is silent. Spec-correct fix is on the server side (heartbeat lives on the GET stream which is server→client only), but a client-side POST ping is a viable safety net.'
+    tags:
+    - mcp
+    - reliability
+    - transport
+    origin: forked-from mnemo disconnect investigation 2026-04-26 — user-suggested design
+    discovered: 2026-04-26

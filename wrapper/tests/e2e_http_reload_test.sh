@@ -67,10 +67,10 @@ trap cleanup EXIT
 "$HTTP_SERVER" --port 0 -v >"$SERVER_OUT" 2>"$SERVER_ERR" &
 SERVER_PID=$!
 
-# Wait up to 2s for the port line to appear.
+# Wait up to 5s for the port line to appear.
 PORT=""
 i=0
-while [ $i -lt 40 ]; do
+while [ $i -lt 100 ]; do
     if [ -s "$SERVER_OUT" ]; then
         PORT=$(head -n 1 "$SERVER_OUT")
         [ -n "$PORT" ] && break
@@ -90,9 +90,9 @@ echo "http reload e2e: fake server on $URL" >&2
 MCPBRIDGE_SOCKET="$SOCK" "$DAEMON" -v 2>"$DAEMON_ERR" &
 DAEMON_PID=$!
 
-# Wait up to 2s for the socket to appear.
+# Wait up to 5s for the socket to appear.
 i=0
-while [ $i -lt 40 ]; do
+while [ $i -lt 100 ]; do
     [ -S "$SOCK" ] && break
     i=$((i+1))
     sleep 0.05
