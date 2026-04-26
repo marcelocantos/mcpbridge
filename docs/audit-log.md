@@ -7,7 +7,7 @@ format.
 
 ## 2026-04-26 — /release v0.5.0
 
-- **Commit**: `pending`
+- **Commit**: `5c8379b`
 - **Outcome**: Internal-hardening release — no public surface
   changes. Adds the `make bullseye` standing-invariants hook (#10)
   so `/cv` and `bullseye_convergence` gate target work on `go vet`
