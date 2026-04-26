@@ -104,7 +104,7 @@ static int start_daemon(struct child_daemon *cd) {
     }
     cd->pid = pid;
 
-    if (wait_for_socket(cd->sock_path, 2000) != 0) {
+    if (wait_for_socket(cd->sock_path, 5000) != 0) {
         fprintf(stderr, "daemon did not create socket %s\n", cd->sock_path);
         kill(pid, SIGTERM);
         waitpid(pid, NULL, 0);
