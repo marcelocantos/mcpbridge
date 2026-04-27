@@ -183,6 +183,24 @@ timeouts: **`-32001`** with message
 reinit"` if the timeout fired during recovery's replay). Added in
 v0.6.0. **stable**.
 
+### Resilience guarantees (daemon side)
+
+What the agent observes across `mcpbridge-daemon` restarts and
+absences. The behaviour itself has been operational since the
+daemon-loop work landed (v0.1.0 era); it is promoted to the public
+contract here so consumers can rely on it without reading the source.
+
+| Guarantee | Trigger | Behaviour |
+|---|---|---|
+| Standalone-mode startup | Daemon socket absent at wrapper startup | wrapper logs `daemon unreachable at <sock>; continuing without it`, brings up the agent's stdio session, and forwards messages normally. Reconnect timer arms. **stable**. |
+| Daemon disconnect tolerance | Daemon socket closes mid-session (clean shutdown, crash, SIGTERM, brew restart) | wrapper logs `daemon socket closed`, frees the daemon client, arms the reconnect timer. The agent's stdio session is unaffected — message forwarding continues. The wrapper does **not** exit. **stable**. |
+| Daemon reconnect with backoff | Daemon socket is unavailable | wrapper retries the connect with capped exponential backoff: 1s → 2s → 4s → 5s (`BACKOFF_INITIAL_MS=1000`, `BACKOFF_MAX_MS=5000`). Each successful reconnect re-runs the full `hello` + `register` handshake, so the daemon learns about the wrapper's child-pid and config-name from scratch. **stable**. |
+| In-progress reload across daemon restart | Daemon dies after broadcasting `reload` but before the wrapper sends `reload_ack` | wrapper completes the reload cycle locally (DRAINING → SWAPPING → STARTING → RUNNING). The `reload_ack` send fails and is logged as a warn; the agent's session has already migrated to the new child. The next reconnect re-registers the wrapper from scratch. **stable**. |
+
+The wrapper exits only on: stdin EOF, SIGINT, SIGTERM, or an FSM
+transition to `FAILED`. Daemon socket loss never triggers any of
+these. Verified by `tests/e2e_daemon_outage_test.sh`.
+
 ### Internal Go API
 
 `daemon/internal/*` — **not public**. Go's `internal` mechanism
