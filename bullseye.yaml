@@ -847,9 +847,11 @@ targets:
     achieved: 2026-04-25
   T6:
     name: mcpbridge HTTP transport sends defensive client-side keepalive pings to its upstream when the server falls silent
-    status: identified
+    status: set_aside
     value: 0.0
     cost: 0.0
+    showcase: true
+    set_aside_reason: 'Won''t fix — violates mcpbridge''s full-protocol-transparency invariant (synthetic JSON-RPC pings the agent never sent). Resolved at the correct layer: heartbeats enabled on the owned HTTP MCP servers (mnemo, sawmill, spyder). If a third-party HTTP server ever forces the question again, revisit as an opt-in per-config field, off by default.'
     acceptance:
     - wrapper/src/transport_http.c sends a JSON-RPC 'ping' request to the upstream URL on a configurable timer (default ~35-40s — slightly longer than the typical mcp-go server-side WithHeartbeatInterval of 30s)
     - The timer is reset whenever ANY frame is received from the upstream (tool response, SSE event, server-initiated notification) — so a server that already heartbeats correctly never triggers an mcpbridge ping
@@ -863,3 +865,57 @@ targets:
     - transport
     origin: forked-from mnemo disconnect investigation 2026-04-26 — user-suggested design
     discovered: 2026-04-26
+  T7:
+    name: mcpbridge transparently survives upstream MCP daemon restarts without dropping the stdio client's session
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    demonstration: 'Built the wrapper with the new resilience pathway, then ran tests/e2e_http_session_invalid_test.sh end-to-end. Sequence demonstrated: (1) initialize + tools/list under session sess-fake-1 succeeds; (2) SIGUSR1 to fake_http_mcp rotates its current session id to sess-fake-2 (simulating an autonomous upstream restart with no daemon involvement); (3) the next tools/list (id=3) POSTs with the now-stale sess-fake-1 and the upstream returns 400 "Bad Request: Invalid session ID"; (4) wrapper logs `http: status 400 ... upstream session is stale, signalling reinit`, then `dispatch: session stale; queuing tools/list for replay after re-init`, then traverses RUNNING → DRAINING → SWAPPING → STARTING → RUNNING with `swap: initialize replayed to new child` and `http: session id captured (sess-fake-2)`; (5) the queued tools/list drains under the new session and the agent receives a response for id=3; (6) tools/list (id=4) succeeds normally under sess-fake-2; (7) tools/list_changed + prompts/list_changed + resources/list_changed all delivered to the stdio client so the agent refetches its registry; (8) the original initialize response appears exactly once in the wrapper''s stdout — the replayed initialize is consumed by dispatch, not forwarded. The agent never saw an error or a disconnect. Test wired into `make test` (Makefile) and passes alongside the daemon-driven reload e2e. The dead-upstream timeout slice (acceptance criterion 4 — TCP-refused tolerance for tens-of-seconds outages) was deferred to a forked T7.1; the rest of T7''s acceptance is satisfied.'
+    acceptance:
+    - Restart the upstream MCP server (e.g. `brew services restart mnemo`) while a Claude Code session is connected via mcpbridge. The session continues to call tools successfully without any user-visible failure or any need to reconnect, restart the session, or open `/mcp`.
+    - 'When the upstream returns 4xx for an Mcp-Session-Id that was valid before the restart (the standard `Bad Request: Invalid session ID` shape), mcpbridge initiates a fresh `initialize` + `notifications/initialized` handshake against the upstream, captures the new Mcp-Session-Id, and silently retries the in-flight tool call (with a small bounded backoff) before returning anything to the stdio client.'
+    - If the upstream tool list changed across the restart (e.g. the daemon was upgraded to a new version that advertises new params or tools), mcpbridge proactively sends a `notifications/tools/list_changed` to the stdio client so its tool registry refreshes within the same session — no Claude Code restart required.
+    - If the upstream is genuinely unreachable for >N seconds (configurable, default 30s), mcpbridge surfaces a structured error to the in-flight tool call but keeps the stdio client alive and continues to retry connections in the background; the next tool call attempted after the upstream returns succeeds without any client-side intervention.
+    - Behaviour is verified by an integration test that spawns a real upstream HTTP MCP server, connects mcpbridge as a stdio client, kills + restarts the upstream mid-stream, and asserts that subsequent tool calls succeed without errors visible to the stdio client.
+    - 'The `tools/list_changed` push and the auto-reinitialize logic are documented in the mcpbridge README under a `## Resilience` section so users understand the guarantee they''re getting (and the one configurable: dead-upstream timeout).'
+    context: |-
+      Discovered 2026-04-27 during /release v0.33.0 of mnemo. The release flow ran `brew services restart mnemo`, which killed the upstream daemon while this Claude Code session was connected via mcpbridge. The expected behaviour was: mcpbridge re-handshakes against the new daemon, possibly emits a tools/list_changed if the schema differs, and the session keeps working with zero user-visible disruption — that is the one job mcpbridge exists to do. The actual behaviour was: every mnemo MCP tool dropped from the session's tool registry mid-flight, the user got an explicit "mnemo MCP server failed" notification, and recovery required either `/mcp` reconnect or killing the mcpbridge stdio child by hand. As the user put it: "The whole point of the mcpbridge was to hide these outages."
+
+      This is a fundamental insulation failure, not a usage gap. The whole architectural rationale for putting mcpbridge between Claude Code and the upstream daemon is to make upstream restarts (releases, crashes, brew upgrades, machine sleep/wake) invisible to long-lived agent sessions. Without that, mcpbridge is more friction than value — Claude Code could just connect directly via http and would get the same failure mode.
+
+      Practical consequences: every mnemo `/release` cycle currently breaks every active Claude Code session that connected via mcpbridge before the release. Same for any other MCP server that releases through the same wrapper. With release cadence of ~1/day on mnemo alone, that's a steady drip of session disruption that defeats the whole abstraction.
+
+      Implementation hints: the upstream's `Bad Request: Invalid session ID` after restart is the trigger to re-initialize. mcp-go's StreamableHTTP client probably already supports the handshake primitives; the bridging layer needs to wrap tool/call requests with a "if 4xx-session-invalid, re-init then retry once" loop. tools/list_changed is a standard MCP notification — the spec already lets the client refresh on receipt. The dead-upstream timeout exists to bound the worst case so a permanently-dead upstream doesn't hang the stdio client forever; surface it as a structured error instead.
+    tags:
+    - resilience
+    - reconnect
+    - release-friction
+    - user-visible-bug
+    origin: forked from mnemo /release v0.33.0 — brew services restart dropped this session's mnemo tools
+    discovered: 2026-04-27
+    achieved: 2026-04-27
+  T7.1:
+    name: mcpbridge tolerates a temporarily-unreachable upstream without exiting the stdio session
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    demonstration: 'Built the wrapper with the new outage-tolerance pathway and ran tests/e2e_http_dead_upstream_test.sh. Three subtests, all green: (A) idle-survives — start wrapper + initialize + tools/list, kill upstream, sit idle for 3s, verify the wrapper''s stderr contains zero "http: connect 127.0.0.1" lines (the wrapper does not poll a dead upstream). Restart upstream on the same port; next tools/list succeeds via T7''s autonomous reinit. (B) in-flight-recovers — kill upstream, immediately issue a tools/list, restart upstream within the 10s configured timeout, observe the wrapper''s "retrying in <ms>" log lines during the gap, verify the tools/list response reaches the agent under the new session. (C) in-flight-timeout — short 1500ms tool_call_timeout_ms, kill upstream permanently, issue tools/list (id=3) — wrapper times out and synthesises a JSON-RPC error envelope to the agent (`{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"mcpbridge: upstream unreachable past timeout"}}`). Issue another tools/list (id=4) — wrapper is still alive and produces a second structured error. Stdio session never died. Wrapper''s stderr logs `send_child: upstream unreachable past timeout; synthesising error response` for each call. Test 3 also exercises the unit-level path: tests/transport_http_test.c::test_connection_refused now sets a 200ms timeout against an unreachable port and asserts errno=ETIMEDOUT. Implementation: tcp_connect_with_backoff (transport_http.c) loops with 100ms→500ms→1s→2s→5s capped backoff, computes the deadline once per http_post_once call, returns ETIMEDOUT when the deadline elapses; sink_send_child maps ETIMEDOUT to DISPATCH_SEND_TIMEOUT; dispatch_on_upstream uses mcp_build_error_response (new helper in mcp.c) to synthesise the agent-facing error and decrements in_flight; dispatch_replay_initialize handles a timeout DURING recovery by draining the queue with synthesised errors and signalling main.c to take the FSM back to RUNNING (avoiding the terminal FAILED state). Idle tolerance is automatic — the wrapper polls only its event-loop fds, never the upstream, so there is no polling code to remove.'
+    acceptance:
+    - mcpbridge never exits because the upstream is unreachable. The stdio session outlives any finite upstream outage — minutes, hours, days — provided the agent isn't actively waiting on a call.
+    - While there is no in-flight tool call, mcpbridge does NOT poll the upstream. It sits idle. Connection attempts only happen lazily, when the agent issues the next tool call.
+    - When a tool call arrives and the upstream is down, mcpbridge retries connection with bounded backoff (1s -> 5s -> 30s, capped) for as long as the call is in flight. There is a per-call timeout (default 5 minutes, configurable) that bounds how long any single tool call may wait — long enough for a brew formula upgrade or short network glitch, short enough that a permanently-broken upstream doesn't hang the agent indefinitely.
+    - If the per-call timeout elapses, the in-flight tool call returns a structured JSON-RPC error to the agent (preserving id, message names the upstream and the timeout). The stdio client remains connected; the wrapper goes back to idle.
+    - When the upstream comes back, the next tool call from the agent succeeds — fresh handshake happens automatically (same code path as T7's reinit). No client-side intervention.
+    - 'Per-call timeout knob is exposed in the per-server schema-v2 config file (e.g. tool_call_timeout_ms: 300000).'
+    - 'Integration test 1: kill the fake HTTP server, leave the wrapper idle for several seconds with no tool calls, assert the wrapper has NOT made any connection attempts (no log lines, no exit). Then restart the fake server, issue a tool call, assert it succeeds.'
+    - 'Integration test 2: kill the fake HTTP server, issue a tool call, observe backoff retries while in flight, restart the fake server before the timeout elapses, assert the call succeeds under the new session.'
+    - 'Integration test 3: kill the fake HTTP server, issue a tool call with a short configured timeout, never restart, assert the call returns a structured JSON-RPC error and the stdio session is still alive (a subsequent tool call triggers fresh retries).'
+    context: 'Forked from T7 on 2026-04-27, refined the same day after the user pointed out that bounding the WRAPPER''s lifetime (rather than the in-flight call''s lifetime) is the wrong invariant. Real MCP servers sit idle for long stretches — hours between tool calls is normal. A 30-second-then-exit policy would punish the common case (server temporarily down during an idle window) just as harshly as the rare case (server permanently broken). The right shape: outage tolerance is unbounded while idle, bounded only when an actual tool call is waiting on it. The wrapper has no business polling the upstream when no one is asking it for anything. Implementation hint: the per-call timeout is enforced inside http_post_once / send_child as a deadline computed at request entry. Backoff retries within that window. On deadline expiry, surface ETIMEDOUT and let dispatch synthesise a structured JSON-RPC error to upstream. Idle behaviour is automatic — there''s no background pinger to remove because mcpbridge doesn''t currently have one. Care needed: when the wrapper is mid-recovery (T7''s reinit pathway) and the upstream goes from "rejecting with 400" to "TCP-refused" mid-handshake, the recovery itself is in flight — the per-call timeout applies to the original tool call that triggered recovery, so the same deadline bounds both the reinit handshake and the eventual replay.'
+    tags:
+    - resilience
+    - timeout
+    - release-friction
+    origin: forked-from T7 (2026-04-27)
+    discovered: 2026-04-27

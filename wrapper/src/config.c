@@ -202,6 +202,7 @@ struct config *config_load(const char *path) {
 
     struct config *c = xcalloc(1, sizeof(*c));
     c->source_path = xstrdup(path);
+    c->tool_call_timeout_ms = CONFIG_DEFAULT_TOOL_CALL_TIMEOUT_MS;
 
     cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
     if (!cJSON_IsNumber(schema)) {
@@ -226,6 +227,18 @@ struct config *config_load(const char *path) {
         goto fail;
     }
     c->name = xstrdup(name->valuestring);
+
+    cJSON *timeout = cJSON_GetObjectItemCaseSensitive(
+        root, "tool_call_timeout_ms");
+    if (timeout != NULL && !cJSON_IsNull(timeout)) {
+        if (!cJSON_IsNumber(timeout) || timeout->valueint < 0) {
+            fprintf(stderr,
+                    "mcpbridge: %s: \"tool_call_timeout_ms\" must be a non-negative integer\n",
+                    path);
+            goto fail;
+        }
+        c->tool_call_timeout_ms = timeout->valueint;
+    }
 
     cJSON *cmd = cJSON_GetObjectItemCaseSensitive(root, "command");
     cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");

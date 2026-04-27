@@ -36,6 +36,12 @@ struct fake_sink_state {
 
     enum fsm_event events[32];
     int            event_count;
+
+    /* When non-zero, the next N calls to fake_send_child return
+     * DISPATCH_SEND_STALE instead of OK. Used to simulate the upstream
+     * having invalidated our session — without this hook, dispatch's
+     * stale-recovery pathway is unreachable from a unit test. */
+    int            stale_returns_remaining;
 };
 
 static void fake_send_upstream(void *ctx, const void *bytes, size_t n) {
@@ -47,13 +53,18 @@ static void fake_send_upstream(void *ctx, const void *bytes, size_t n) {
     s->up_len += n;
 }
 
-static void fake_send_child(void *ctx, const void *bytes, size_t n) {
+static int fake_send_child(void *ctx, const void *bytes, size_t n) {
     struct fake_sink_state *s = ctx;
+    if (s->stale_returns_remaining > 0) {
+        s->stale_returns_remaining--;
+        return DISPATCH_SEND_STALE;
+    }
     if (s->child_len + n > FAKE_BUF_CAP) {
-        return;
+        return DISPATCH_SEND_OK;
     }
     memcpy(s->child_buf + s->child_len, bytes, n);
     s->child_len += n;
+    return DISPATCH_SEND_OK;
 }
 
 static void fake_emit_event(void *ctx, enum fsm_event ev) {
@@ -594,6 +605,77 @@ static void test_replay_error_no_list_changed(void) {
     dispatch_free(d);
 }
 
+static void test_stale_send_requeues_and_triggers_reload(void) {
+    /* When send_child returns STALE while RUNNING, dispatch must:
+     *   - undo the in-flight increment (the request never landed)
+     *   - put the message bytes back in the queue
+     *   - emit RELOAD_REQUESTED so the wrapper transitions through
+     *     DRAINING -> SWAPPING and re-handshakes the upstream
+     * After RUNNING is restored, the queued message drains under the
+     * new session id without the agent ever seeing an error. */
+    struct fsm f;
+    fsm_init(&f);
+    fsm_step(&f, FSM_EV_INITIALIZE_OK); /* RUNNING */
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    /* Drive the first handshake so the cache is populated. */
+    struct mcp_msg init_req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+    struct mcp_msg init_resp = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
+    dispatch_on_upstream(d, &init_req);
+    dispatch_on_child(d, &init_resp);
+    CHECK(dispatch_initialized(d), "initialized");
+
+    memset(&sink_state, 0, sizeof(sink_state));
+
+    /* Arm the fake sink to return STALE on the next send. */
+    sink_state.stale_returns_remaining = 1;
+
+    /* Upstream issues a tools/call. */
+    struct mcp_msg req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"foo\"}}");
+    dispatch_on_upstream(d, &req);
+
+    /* The send was rejected → dispatch must not have left in_flight
+     * incremented, must have queued the bytes, and must have emitted
+     * RELOAD_REQUESTED. */
+    CHECK(dispatch_in_flight(d) == 0,
+          "in_flight rolled back after STALE");
+    CHECK(sink_state.child_len == 0,
+          "no bytes recorded as forwarded (the STALE attempt failed)");
+    CHECK(sink_state.event_count == 1, "one event emitted");
+    CHECK(sink_state.events[0] == FSM_EV_RELOAD_REQUESTED,
+          "RELOAD_REQUESTED emitted on STALE");
+
+    /* Simulate the wrapper running the reload pathway: FSM moves
+     * RUNNING -> DRAINING -> SWAPPING -> STARTING -> RUNNING.
+     * dispatch_on_state_change(RUNNING) must drain the requeued
+     * message. */
+    fsm_step(&f, FSM_EV_RELOAD_REQUESTED); /* RUNNING -> DRAINING */
+    fsm_step(&f, FSM_EV_IN_FLIGHT_ZERO);   /* DRAINING -> SWAPPING */
+    fsm_step(&f, FSM_EV_TRANSPORT_STARTED); /* SWAPPING -> STARTING */
+    fsm_step(&f, FSM_EV_INITIALIZE_OK);    /* STARTING -> RUNNING */
+    dispatch_on_state_change(d, f.state);
+
+    CHECK(strstr(sink_state.child_buf, "tools/call") != NULL,
+          "queued tools/call drained to child after recovery");
+
+    mcp_msg_free(&init_req);
+    mcp_msg_free(&init_resp);
+    mcp_msg_free(&req);
+    dispatch_free(d);
+}
+
 static void test_replay_noop_without_cache(void) {
     struct fsm f;
     fsm_init(&f);
@@ -627,6 +709,7 @@ int main(void) {
     test_replay_sends_cached_bytes_to_child();
     test_replay_response_consumed_not_forwarded();
     test_replay_error_no_list_changed();
+    test_stale_send_requeues_and_triggers_reload();
     test_replay_noop_without_cache();
 
     if (fail_count > 0) {

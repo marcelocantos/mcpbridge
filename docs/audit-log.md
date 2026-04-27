@@ -5,6 +5,30 @@ Maintenance actions taken on this repo by `/audit`, `/docs`,
 the top. See `~/.claude/skills/audit-log-convention.md` for the
 format.
 
+## 2026-04-27 — /release v0.6.0
+
+- **Commit**: `pending`
+- **Outcome**: Resilience-overhaul release. Ships 🎯T7
+  (autonomous self-reload when the upstream returns
+  `400 Bad Request: Invalid session ID`, with `tools/list_changed`
+  + `prompts/list_changed` + `resources/list_changed` broadcast on
+  recovery — closes the gap where `brew services restart
+  <upstream>` outside the daemon's view used to drop every active
+  Claude Code session) and 🎯T7.1 (idle outage tolerance + bounded
+  in-flight retry with a configurable per-call timeout, default
+  300000 ms; on deadline expiry the wrapper synthesises a
+  structured JSON-RPC error with code `-32001` and keeps the stdio
+  session alive). New optional config field
+  `tool_call_timeout_ms`. STABILITY.md gains a "Resilience
+  guarantees" subsection that promotes the contract to a public
+  surface item; settling clock unchanged at 2026-04-25 — both
+  changes are additive (existing configs work unchanged, no
+  surface removed). Three new e2e tests
+  (e2e_http_session_invalid_test.sh,
+  e2e_http_dead_upstream_test.sh) wired into `make test`. Forks a
+  follow-up target 🎯T7.1 was raised and retired in the same
+  release; no surviving work remains for resilience.
+
 ## 2026-04-26 — /release v0.5.0
 
 - **Commit**: `5c8379b`

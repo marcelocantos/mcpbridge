@@ -17,6 +17,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 /* MCP wire-protocol-version we advertise. Tracked by the mcp-go
@@ -129,6 +130,26 @@ static int http_url_parse(const char *url, struct http_url *out) {
 /* =============================================================
  * TCP connect
  * ============================================================= */
+
+/* Monotonic clock helper (milliseconds). Used by the connect-retry
+ * loop to enforce the per-call deadline. */
+static long long http_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + (long long)ts.tv_nsec / 1000000LL;
+}
+
+/* Sleep for `ms` milliseconds, EINTR-safe. Used between connect
+ * retries — short enough that the wrapper still responds promptly to
+ * shutdown signals (the longest backoff step is 5s). */
+static void http_sleep_ms(int ms) {
+    struct timespec req, rem;
+    req.tv_sec  = ms / 1000;
+    req.tv_nsec = (long)(ms % 1000) * 1000000L;
+    while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
+        req = rem;
+    }
+}
 
 /* Connect a blocking TCP socket to host:port. Returns a connected
  * fd on success, -1 on error (errno set). */
@@ -645,6 +666,12 @@ struct http_self {
     char              session_id[128];   /* "" until initialize response */
     int               started;
 
+    /* Per-tool-call deadline budget (milliseconds). A POST that
+     * cannot reach the upstream within this many ms (across any
+     * connect-retry-with-backoff) returns ETIMEDOUT instead of
+     * EPROTO/ECONNREFUSED. 0 means "retry forever". See 🎯T7.1. */
+    int               call_timeout_ms;
+
     /* Self-pipe used to wake poll() when messages have been queued. */
     int               wake_fds[2];       /* [0]=read, [1]=write */
 
@@ -791,12 +818,84 @@ static int read_response_body(int fd,
     }
 }
 
+/* Connect to the upstream, retrying transient failures (refused,
+ * unreachable, network down) with bounded backoff until either the
+ * connect succeeds or the per-call deadline elapses. Returns a
+ * connected fd, or -1 with errno set (ETIMEDOUT if the deadline was
+ * exceeded; the underlying connect errno otherwise).
+ *
+ * deadline_ms is the absolute monotonic-ms point at which we give
+ * up. Pass <= 0 (i.e. when call_timeout_ms is 0) to disable the
+ * deadline entirely — retry forever. The back-off pattern is
+ * 100ms -> 500ms -> 1s -> 2s -> 5s, capped at 5s; the first attempt
+ * is unwasted (no sleep before it). */
+static int tcp_connect_with_backoff(const char *host, int port,
+                                    long long deadline_ms) {
+    static const int backoff_steps_ms[] = {100, 500, 1000, 2000, 5000};
+    static const int backoff_count =
+        (int)(sizeof(backoff_steps_ms) / sizeof(backoff_steps_ms[0]));
+    int attempt = 0;
+    int last_errno = ECONNREFUSED;
+
+    for (;;) {
+        int fd = tcp_connect(host, port);
+        if (fd >= 0) {
+            return fd;
+        }
+        last_errno = errno;
+        /* Only retry on errors that are plausibly transient. A
+         * gai_strerror or EINVAL means the URL is wrong; a thousand
+         * retries won't fix it. */
+        if (last_errno != ECONNREFUSED
+         && last_errno != ETIMEDOUT
+         && last_errno != EHOSTUNREACH
+         && last_errno != ENETUNREACH
+         && last_errno != ENETDOWN
+         && last_errno != EAGAIN
+         && last_errno != EIO) {
+            errno = last_errno;
+            return -1;
+        }
+
+        /* Pick a backoff step. */
+        int step_ms = backoff_steps_ms[
+            attempt < backoff_count ? attempt : backoff_count - 1];
+        attempt++;
+
+        /* Decide whether the next sleep+attempt fits inside the
+         * deadline. With deadline_ms <= 0 (disabled), we always go
+         * round again — the agent's session is the safety valve. */
+        if (deadline_ms > 0) {
+            long long now = http_monotonic_ms();
+            long long remain = deadline_ms - now;
+            if (remain <= 0) {
+                log_warn("http: connect deadline exceeded (host=%s port=%d "
+                         "last_errno=%s)",
+                         host, port, strerror(last_errno));
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            if ((long long)step_ms > remain) {
+                step_ms = (int)remain;
+            }
+        }
+        log_debug("http: connect %s:%d failed (%s), retrying in %d ms",
+                  host, port, strerror(last_errno), step_ms);
+        http_sleep_ms(step_ms);
+    }
+}
+
 /* Build and write the POST request, then read and parse the
  * response. Queues any inbound MCP messages into h->queue and
  * captures the session id. Returns 0 on success, -1 on error. */
 static int http_post_once(struct http_self *h,
                           const void *body_bytes, size_t body_len) {
-    int fd = tcp_connect(h->url.host, h->url.port);
+    long long deadline_ms = 0;
+    if (h->call_timeout_ms > 0) {
+        deadline_ms = http_monotonic_ms() + (long long)h->call_timeout_ms;
+    }
+    int fd = tcp_connect_with_backoff(h->url.host, h->url.port,
+                                      deadline_ms);
     if (fd < 0) {
         return -1;
     }
@@ -854,6 +953,27 @@ static int http_post_once(struct http_self *h,
         return -1;
     }
     if (resp.status < 200 || resp.status >= 300) {
+        /* Distinguish "session is no longer valid" (recoverable) from
+         * other non-2xx (fatal). Session loss is the canonical 4xx
+         * response shape used by mcp-go's session middleware and by
+         * the MCP spec — typically 400 with a body of "Bad Request:
+         * Invalid session ID", or 404 if the server's session table
+         * was wiped on restart. Treat any 4xx with a session id
+         * already in flight as stale: the upstream lost track of us,
+         * and the wrapper's reinit path can recover transparently.
+         * Without a session id (the very first request), 4xx is a
+         * genuine error — we have nothing to re-handshake from. */
+        int stale = (resp.status >= 400 && resp.status < 500
+                  && h->session_id[0] != '\0');
+        if (stale) {
+            log_info("http: status %d from %s with active session "
+                     "id; upstream session is stale, signalling "
+                     "reinit", resp.status, h->url.path);
+            h->session_id[0] = '\0';
+            close(fd);
+            errno = ESTALE;
+            return -1;
+        }
         log_error("http: non-2xx status %d from POST %s",
                   resp.status, h->url.path);
         close(fd);
@@ -1013,9 +1133,24 @@ struct transport *transport_http_new(const char *url) {
     }
     h->wake_fds[0] = -1;
     h->wake_fds[1] = -1;
+    /* Default: no per-call timeout. The wrapper sets the configured
+     * value via transport_http_set_call_timeout right after
+     * construction. Tests that build a transport without going
+     * through main.c get the "retry forever" behaviour, which keeps
+     * unit tests deterministic — they do not exercise outage paths. */
+    h->call_timeout_ms = 0;
 
     struct transport *t = xcalloc(1, sizeof(*t));
     t->ops  = &http_ops;
     t->self = h;
     return t;
+}
+
+void transport_http_set_call_timeout(struct transport *t, int timeout_ms) {
+    if (t == NULL || t->ops != &http_ops) {
+        return;
+    }
+    struct http_self *h = t->self;
+    if (timeout_ms < 0) timeout_ms = 0;
+    h->call_timeout_ms = timeout_ms;
 }

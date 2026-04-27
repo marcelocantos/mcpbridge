@@ -167,4 +167,23 @@ int mcp_reader_pop(struct mcp_reader *r, const char **line, size_t *len);
  * receives the buffer length in bytes (including the newline). */
 char *mcp_build_list_changed(const char *kind, size_t *out_len);
 
+/* Build a JSON-RPC error response for the given request id, with the
+ * given error code and message. Used by the wrapper to synthesise a
+ * structured failure when the upstream is unreachable beyond the
+ * per-tool-call timeout (🎯T7.1) — the agent receives a normal
+ * error reply for that one call instead of losing its session.
+ *
+ * `id` must be either MCP_ID_INT or MCP_ID_STRING (notifications
+ * have no id, so passing MCP_ID_NONE returns NULL). `message` must
+ * be a UTF-8 string with no control characters; characters outside
+ * the JSON-safe range are not escaped beyond what cJSON does
+ * automatically. Returns a buffer terminated by a single '\n'.
+ * Caller owns the buffer (free() when done). out_len, if non-NULL,
+ * receives the buffer length including the newline. Returns NULL on
+ * allocation failure or invalid id. */
+char *mcp_build_error_response(const struct mcp_id *id,
+                               int code,
+                               const char *message,
+                               size_t *out_len);
+
 #endif /* MCPBRIDGE_MCP_H */

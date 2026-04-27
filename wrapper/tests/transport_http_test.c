@@ -413,16 +413,24 @@ static void test_bad_url(void) {
 
 static void test_connection_refused(void) {
     /* Port 1 is privileged and reliably unbound on dev machines;
-     * a connect attempt gets ECONNREFUSED quickly. */
+     * a connect attempt gets ECONNREFUSED. Under 🎯T7.1 the
+     * transport retries refused connects with backoff up to the
+     * per-call timeout — so we set a short timeout here and expect
+     * the send to fail with ETIMEDOUT after at least one backoff
+     * round, not immediately. */
     struct transport *t = transport_http_new("http://127.0.0.1:1/mcp");
     CHECK(t != NULL, "transport created");
+    transport_http_set_call_timeout(t, 200);
     int rc = transport_start(t);
     CHECK(rc == 0, "transport_start succeeds (no connection yet)");
 
     const char msg[] = "{\"jsonrpc\":\"2.0\",\"id\":1,"
                        "\"method\":\"initialize\"}\n";
+    errno = 0;
     rc = transport_send(t, msg, sizeof(msg) - 1);
     CHECK(rc < 0, "send returns error when server is unreachable");
+    CHECK(errno == ETIMEDOUT,
+          "send fails with ETIMEDOUT once the per-call deadline expires");
 
     transport_stop(t);
     transport_destroy(t);

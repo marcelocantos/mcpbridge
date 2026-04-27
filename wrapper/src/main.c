@@ -242,11 +242,35 @@ static void sink_send_upstream(void *ctx, const void *bytes, size_t n) {
     }
 }
 
-static void sink_send_child(void *ctx, const void *bytes, size_t n) {
+static int sink_send_child(void *ctx, const void *bytes, size_t n) {
     struct loop_ctx *c = ctx;
-    if (transport_send(c->transport, bytes, n) != 0) {
-        c->exit_requested = 1;
+    if (transport_send(c->transport, bytes, n) == 0) {
+        return DISPATCH_SEND_OK;
     }
+    /* The HTTP transport surfaces upstream-session-loss as ESTALE.
+     * Any other failure is treated as fatal (the transport itself is
+     * unusable — e.g. the stdio child is gone, or the HTTP socket is
+     * persistently broken). The reload pathway recovers from the
+     * STALE case transparently; FATAL kills the wrapper. */
+    if (errno == ESTALE) {
+        log_info("send_child: upstream session stale; "
+                 "triggering self-reload");
+        return DISPATCH_SEND_STALE;
+    }
+    if (errno == ETIMEDOUT) {
+        /* The upstream stayed unreachable for the entire per-call
+         * timeout. The wrapper itself stays alive — dispatch will
+         * synthesise a structured JSON-RPC error to the agent for
+         * the in-flight request, and the next tool call resumes
+         * normal flow (T7 reinit fires automatically as soon as the
+         * upstream is back). 🎯T7.1. */
+        log_warn("send_child: upstream unreachable past timeout; "
+                 "synthesising error response");
+        return DISPATCH_SEND_TIMEOUT;
+    }
+    log_error("send_child: transport_send failed: %s", strerror(errno));
+    c->exit_requested = 1;
+    return DISPATCH_SEND_FATAL;
 }
 
 static void sink_emit_event(void *ctx, enum fsm_event ev) {
@@ -404,6 +428,21 @@ static int perform_swap(struct loop_ctx *c) {
         log_warn("swap: no cached initialize to replay");
         sink_emit_event(c, FSM_EV_INITIALIZE_FAILED);
         return -1;
+    }
+    if (rc < 0) {
+        /* Replay attempted but the upstream did not return within
+         * the per-tool-call timeout. dispatch has already
+         * synthesised structured error responses for every queued
+         * agent call, so the agent saw a normal failure for each.
+         * Survive: transition the FSM back to RUNNING so the next
+         * agent request can trigger a fresh recovery cycle. The
+         * session id is already cleared; the wrapper is now
+         * effectively in "stale and waiting for next call" mode.
+         * 🎯T7.1. */
+        log_warn("swap: replay initialize timed out; "
+                 "wrapper survives, awaiting next agent request");
+        sink_emit_event(c, FSM_EV_INITIALIZE_OK);
+        return 0;
     }
     log_info("swap: initialize replayed to new child");
     return 0;
@@ -772,6 +811,7 @@ int main(int argc, char **argv) {
             config_free(cfg);
             return 1;
         }
+        transport_http_set_call_timeout(t, cfg->tool_call_timeout_ms);
         child_bin = cfg->url;
         break;
     default:
