@@ -7,7 +7,7 @@ format.
 
 ## 2026-04-27 — /release v0.6.0
 
-- **Commit**: `pending`
+- **Commit**: `65d19d4`
 - **Outcome**: Resilience-overhaul release. Ships 🎯T7
   (autonomous self-reload when the upstream returns
   `400 Bad Request: Invalid session ID`, with `tools/list_changed`
