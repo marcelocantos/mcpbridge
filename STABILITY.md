@@ -4,7 +4,7 @@ mcpbridge is a pre-1.0 project. This document tracks the public
 interaction surface and what still needs to settle before a 1.0
 release.
 
-Snapshot as of: **v0.5.0**.
+Snapshot as of: **v0.6.0**.
 
 ## Stability commitment
 
@@ -138,6 +138,7 @@ Envelope fields:
 | `source` | object | yes | — | **stable** (see per-type below) |
 | `upgrade` | `off`\|`notify`\|`auto` | no | `notify` | **stable** |
 | `check_interval` | Go duration | no | `1h` | **stable** |
+| `tool_call_timeout_ms` | int (≥0) | no | `300000` | **stable** — added in v0.6.0. Bounds how long any single tool call may wait for the upstream when the HTTP backend is in retry. `0` disables the bound (retry until the agent or some outer timeout intervenes). Idle wrapper does no upstream I/O regardless of value. |
 
 Source `brew`:
 - `type: "brew"`, `formula: "<string>"` — **stable**
@@ -162,6 +163,25 @@ Name collisions resolve earlier-dir-wins. **stable**.
 - Socket: as documented above.
 - Daemon logs: `$HOMEBREW_PREFIX/var/log/mcpbridge-daemon.log`
   (when run under `brew services`). **stable**.
+
+### Resilience guarantees (HTTP backend)
+
+What the agent observes across upstream restarts and outages.
+Stable contract from v0.6.0 onward; additive changes only.
+
+| Guarantee | Trigger | Behaviour |
+|---|---|---|
+| Daemon-driven reload | `mcpbridge-daemon` broadcasts `reload` (e.g. brew upgrade detected) | wrapper drains in-flight, re-handshakes upstream, replays cached `initialize` + `notifications/initialized`, emits `tools/list_changed` + `prompts/list_changed` + `resources/list_changed` upstream, sends `reload_ack`. Agent sees zero disconnect. **stable**. |
+| Autonomous self-reload | Upstream returns 4xx (typically `400 Bad Request: Invalid session ID`) for a request bearing the cached MCP-Session-Id | wrapper detects the stale session, queues the failed request, runs the daemon-less equivalent of the reload pathway (re-handshake + replay + list_changed broadcast), then drains the queued request under the new session. Added in v0.6.0. **stable**. |
+| Idle outage tolerance | Upstream becomes unreachable while no tool call is in flight | wrapper does no upstream I/O — there is no background pinger and no idle timeout. Outages of arbitrary length pass unobserved. The next tool call after the upstream returns succeeds via autonomous self-reload. Added in v0.6.0. **stable**. |
+| In-flight outage tolerance | Upstream becomes unreachable *while* a tool call is waiting | wrapper retries connect with bounded backoff (100ms → 500ms → 1s → 2s → 5s, capped) up to `tool_call_timeout_ms` (default 5 min). On success: T7's reinit fires and the call lands under the new session. On deadline expiry: see "Tool-call timeout error". Added in v0.6.0. **stable**. |
+| Tool-call timeout error | `tool_call_timeout_ms` elapses with the upstream still unreachable | wrapper synthesises a JSON-RPC error response to the agent (preserving the original `id`) and keeps the stdio session alive. Subsequent tool calls trigger fresh retries. Added in v0.6.0. **stable**. |
+
+JSON-RPC error code emitted by the wrapper for upstream-unreachable
+timeouts: **`-32001`** with message
+`"mcpbridge: upstream unreachable past timeout"` (or `"… during
+reinit"` if the timeout fired during recovery's replay). Added in
+v0.6.0. **stable**.
 
 ### Internal Go API
 
@@ -200,7 +220,7 @@ These must be addressed before the v1.0.0 release can ship.
    after a reload exposes a different surface than the old one,
    the agent's worldview has to catch up.
 
-   **What v0.2.0 ships:** after a successful replay, dispatch
+   **What v0.2.0 shipped:** after a successful replay, dispatch
    unconditionally emits `notifications/tools/list_changed`,
    `notifications/prompts/list_changed`, and
    `notifications/resources/list_changed` upstream. Agents react
@@ -208,6 +228,13 @@ These must be addressed before the v1.0.0 release can ship.
    reschemaed items on the new child become visible without any
    diffing state on the wrapper side. This is the common case —
    an MCP server upgrade that adds a tool or tightens a schema.
+
+   **What v0.6.0 added:** the same broadcast now also fires on
+   autonomous self-reload (4xx-stale-session detection in the
+   HTTP backend), not just daemon-driven reload. Practically
+   that means a `brew services restart <upstream>` outside the
+   daemon's view — or any other autonomous upstream restart —
+   no longer leaves the agent with a stale tool registry.
 
    **What's still deferred to 1.0:**
 
@@ -297,18 +324,23 @@ These must be addressed before the v1.0.0 release can ship.
 
 ## Settling clock
 
-Surface item count (rough): ~35 public items (CLI flags × 2
+Surface item count (rough): ~40 public items (CLI flags × 2
 binaries + wire protocol message types + config schema fields +
-environment variables + signals). That puts us in the 20–50
-bracket → **minimum 2 months settling period** before 1.0
-eligibility.
+environment variables + signals + resilience guarantees). That
+keeps us in the 20–50 bracket → **minimum 2 months settling
+period** before 1.0 eligibility.
 
-Clock starts at the last additive change to the interaction
-surface that's material enough to warrant re-settling. v0.4.0
-restructures the wrapper's CLI into the unified `connect <path>`
-form, removes the v0.3.0 argv flags (`--`, `--url`, `--config`),
-and bumps the config schema to v2 with new `command`/`args`/`url`
-fields — a meaningful breaking change. Settling clock restarts at
-**2026-04-25**. Earliest 1.0 eligibility is therefore at least 2
-months out from that date, assuming no further breaking or
-significantly-additive changes.
+Clock starts at the last breaking change to the interaction
+surface. v0.4.0 restructured the wrapper's CLI into the unified
+`connect <path>` form, removed the v0.3.0 argv flags (`--`,
+`--url`, `--config`), and bumped the config schema to v2 with new
+`command`/`args`/`url` fields — a meaningful breaking change.
+Settling clock restarts at **2026-04-25**. v0.5.0 was internal
+hardening with no surface change. v0.6.0 adds
+`tool_call_timeout_ms` (new optional field, default preserves
+prior behaviour for any practical workload) and a Resilience
+guarantees section documenting behaviour that pre-v0.6 left
+implicit — both additive, both extending the contract rather than
+narrowing it, neither resets the clock. Earliest 1.0 eligibility
+is therefore at least 2 months out from 2026-04-25, assuming no
+further breaking changes.
