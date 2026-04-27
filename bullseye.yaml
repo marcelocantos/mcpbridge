@@ -847,9 +847,11 @@ targets:
     achieved: 2026-04-25
   T6:
     name: mcpbridge HTTP transport sends defensive client-side keepalive pings to its upstream when the server falls silent
-    status: identified
+    status: set_aside
     value: 0.0
     cost: 0.0
+    showcase: true
+    set_aside_reason: 'Won''t fix — violates mcpbridge''s full-protocol-transparency invariant (synthetic JSON-RPC pings the agent never sent). Resolved at the correct layer: heartbeats enabled on the owned HTTP MCP servers (mnemo, sawmill, spyder). If a third-party HTTP server ever forces the question again, revisit as an opt-in per-config field, off by default.'
     acceptance:
     - wrapper/src/transport_http.c sends a JSON-RPC 'ping' request to the upstream URL on a configurable timer (default ~35-40s — slightly longer than the typical mcp-go server-side WithHeartbeatInterval of 30s)
     - The timer is reset whenever ANY frame is received from the upstream (tool response, SSE event, server-initiated notification) — so a server that already heartbeats correctly never triggers an mcpbridge ping
@@ -863,3 +865,30 @@ targets:
     - transport
     origin: forked-from mnemo disconnect investigation 2026-04-26 — user-suggested design
     discovered: 2026-04-26
+  T7:
+    name: mcpbridge transparently survives upstream MCP daemon restarts without dropping the stdio client's session
+    status: identified
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - Restart the upstream MCP server (e.g. `brew services restart mnemo`) while a Claude Code session is connected via mcpbridge. The session continues to call tools successfully without any user-visible failure or any need to reconnect, restart the session, or open `/mcp`.
+    - 'When the upstream returns 4xx for an Mcp-Session-Id that was valid before the restart (the standard `Bad Request: Invalid session ID` shape), mcpbridge initiates a fresh `initialize` + `notifications/initialized` handshake against the upstream, captures the new Mcp-Session-Id, and silently retries the in-flight tool call (with a small bounded backoff) before returning anything to the stdio client.'
+    - If the upstream tool list changed across the restart (e.g. the daemon was upgraded to a new version that advertises new params or tools), mcpbridge proactively sends a `notifications/tools/list_changed` to the stdio client so its tool registry refreshes within the same session — no Claude Code restart required.
+    - If the upstream is genuinely unreachable for >N seconds (configurable, default 30s), mcpbridge surfaces a structured error to the in-flight tool call but keeps the stdio client alive and continues to retry connections in the background; the next tool call attempted after the upstream returns succeeds without any client-side intervention.
+    - Behaviour is verified by an integration test that spawns a real upstream HTTP MCP server, connects mcpbridge as a stdio client, kills + restarts the upstream mid-stream, and asserts that subsequent tool calls succeed without errors visible to the stdio client.
+    - 'The `tools/list_changed` push and the auto-reinitialize logic are documented in the mcpbridge README under a `## Resilience` section so users understand the guarantee they''re getting (and the one configurable: dead-upstream timeout).'
+    context: |-
+      Discovered 2026-04-27 during /release v0.33.0 of mnemo. The release flow ran `brew services restart mnemo`, which killed the upstream daemon while this Claude Code session was connected via mcpbridge. The expected behaviour was: mcpbridge re-handshakes against the new daemon, possibly emits a tools/list_changed if the schema differs, and the session keeps working with zero user-visible disruption — that is the one job mcpbridge exists to do. The actual behaviour was: every mnemo MCP tool dropped from the session's tool registry mid-flight, the user got an explicit "mnemo MCP server failed" notification, and recovery required either `/mcp` reconnect or killing the mcpbridge stdio child by hand. As the user put it: "The whole point of the mcpbridge was to hide these outages."
+
+      This is a fundamental insulation failure, not a usage gap. The whole architectural rationale for putting mcpbridge between Claude Code and the upstream daemon is to make upstream restarts (releases, crashes, brew upgrades, machine sleep/wake) invisible to long-lived agent sessions. Without that, mcpbridge is more friction than value — Claude Code could just connect directly via http and would get the same failure mode.
+
+      Practical consequences: every mnemo `/release` cycle currently breaks every active Claude Code session that connected via mcpbridge before the release. Same for any other MCP server that releases through the same wrapper. With release cadence of ~1/day on mnemo alone, that's a steady drip of session disruption that defeats the whole abstraction.
+
+      Implementation hints: the upstream's `Bad Request: Invalid session ID` after restart is the trigger to re-initialize. mcp-go's StreamableHTTP client probably already supports the handshake primitives; the bridging layer needs to wrap tool/call requests with a "if 4xx-session-invalid, re-init then retry once" loop. tools/list_changed is a standard MCP notification — the spec already lets the client refresh on receipt. The dead-upstream timeout exists to bound the worst case so a permanently-dead upstream doesn't hang the stdio client forever; surface it as a structured error instead.
+    tags:
+    - resilience
+    - reconnect
+    - release-friction
+    - user-visible-bug
+    origin: forked from mnemo /release v0.33.0 — brew services restart dropped this session's mnemo tools
+    discovered: 2026-04-27
