@@ -242,11 +242,24 @@ static void sink_send_upstream(void *ctx, const void *bytes, size_t n) {
     }
 }
 
-static void sink_send_child(void *ctx, const void *bytes, size_t n) {
+static int sink_send_child(void *ctx, const void *bytes, size_t n) {
     struct loop_ctx *c = ctx;
-    if (transport_send(c->transport, bytes, n) != 0) {
-        c->exit_requested = 1;
+    if (transport_send(c->transport, bytes, n) == 0) {
+        return DISPATCH_SEND_OK;
     }
+    /* The HTTP transport surfaces upstream-session-loss as ESTALE.
+     * Any other failure is treated as fatal (the transport itself is
+     * unusable — e.g. the stdio child is gone, or the HTTP socket is
+     * persistently broken). The reload pathway recovers from the
+     * STALE case transparently; FATAL kills the wrapper. */
+    if (errno == ESTALE) {
+        log_info("send_child: upstream session stale; "
+                 "triggering self-reload");
+        return DISPATCH_SEND_STALE;
+    }
+    log_error("send_child: transport_send failed: %s", strerror(errno));
+    c->exit_requested = 1;
+    return DISPATCH_SEND_FATAL;
 }
 
 static void sink_emit_event(void *ctx, enum fsm_event ev) {

@@ -867,9 +867,11 @@ targets:
     discovered: 2026-04-26
   T7:
     name: mcpbridge transparently survives upstream MCP daemon restarts without dropping the stdio client's session
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
+    showcase: true
+    demonstration: 'Built the wrapper with the new resilience pathway, then ran tests/e2e_http_session_invalid_test.sh end-to-end. Sequence demonstrated: (1) initialize + tools/list under session sess-fake-1 succeeds; (2) SIGUSR1 to fake_http_mcp rotates its current session id to sess-fake-2 (simulating an autonomous upstream restart with no daemon involvement); (3) the next tools/list (id=3) POSTs with the now-stale sess-fake-1 and the upstream returns 400 "Bad Request: Invalid session ID"; (4) wrapper logs `http: status 400 ... upstream session is stale, signalling reinit`, then `dispatch: session stale; queuing tools/list for replay after re-init`, then traverses RUNNING → DRAINING → SWAPPING → STARTING → RUNNING with `swap: initialize replayed to new child` and `http: session id captured (sess-fake-2)`; (5) the queued tools/list drains under the new session and the agent receives a response for id=3; (6) tools/list (id=4) succeeds normally under sess-fake-2; (7) tools/list_changed + prompts/list_changed + resources/list_changed all delivered to the stdio client so the agent refetches its registry; (8) the original initialize response appears exactly once in the wrapper''s stdout — the replayed initialize is consumed by dispatch, not forwarded. The agent never saw an error or a disconnect. Test wired into `make test` (Makefile) and passes alongside the daemon-driven reload e2e. The dead-upstream timeout slice (acceptance criterion 4 — TCP-refused tolerance for tens-of-seconds outages) was deferred to a forked T7.1; the rest of T7''s acceptance is satisfied.'
     acceptance:
     - Restart the upstream MCP server (e.g. `brew services restart mnemo`) while a Claude Code session is connected via mcpbridge. The session continues to call tools successfully without any user-visible failure or any need to reconnect, restart the session, or open `/mcp`.
     - 'When the upstream returns 4xx for an Mcp-Session-Id that was valid before the restart (the standard `Bad Request: Invalid session ID` shape), mcpbridge initiates a fresh `initialize` + `notifications/initialized` handshake against the upstream, captures the new Mcp-Session-Id, and silently retries the in-flight tool call (with a small bounded backoff) before returning anything to the stdio client.'
@@ -891,4 +893,25 @@ targets:
     - release-friction
     - user-visible-bug
     origin: forked from mnemo /release v0.33.0 — brew services restart dropped this session's mnemo tools
+    discovered: 2026-04-27
+    achieved: 2026-04-27
+  T7.1:
+    name: mcpbridge tolerates a temporarily-unreachable upstream without exiting the stdio session
+    status: identified
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    acceptance:
+    - When the upstream HTTP MCP server is unreachable (TCP connect fails repeatedly with ECONNREFUSED, or the request hits the timeout), mcpbridge does NOT exit. The stdio client stays connected.
+    - mcpbridge retries upstream connections in the background with bounded backoff (1s -> 5s, capped) until either the upstream returns or the configured dead-upstream timeout (default 30s) elapses.
+    - If the dead-upstream timeout elapses, the in-flight tool call returns a structured JSON-RPC error to the agent (preserving id, message describes the upstream as unreachable). The stdio client remains connected; subsequent tool calls trigger new connection attempts.
+    - When the upstream comes back, the next tool call from the agent succeeds without any client-side intervention (re-handshake happens automatically, same code path as T7).
+    - 'Timeout knob is exposed in the per-server schema-v2 config file (e.g. upstream_timeout_ms: 30000).'
+    - Integration test spawns a fake HTTP MCP, kills it (TCP refused), waits past timeout, verifies a structured error to the agent. Then restarts the fake server and verifies the next call succeeds.
+    context: 'Forked from T7 on 2026-04-27. T7''s acceptance criterion 4 (dead-upstream timeout) was deferred to keep T7''s first slice tractable. T7''s implementation handles 4xx-with-active-session-id (the upstream restarted but is reachable again) — the most common case (brew services restart, normal release cycles). What''s still missing: when the upstream is genuinely down for tens of seconds, TCP connect fails immediately with ECONNREFUSED, http_post_once returns -1 with errno=ECONNREFUSED, sink_send_child treats as fatal, wrapper exits and the stdio client loses session. Fix lives in transport_http.c''s tcp_connect path: retry with bounded backoff up to a configurable deadline, then surface ETIMEDOUT so dispatch can synthesise a structured JSON-RPC error to upstream — keep the stdio client alive. Retries resume on the next tool call.'
+    tags:
+    - resilience
+    - timeout
+    - release-friction
+    origin: forked-from T7 (2026-04-27)
     discovered: 2026-04-27

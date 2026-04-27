@@ -35,11 +35,32 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t stopping = 0;
+static volatile sig_atomic_t rotate_session = 0;
 static int verbose = 0;
+
+/* Current session id. Initialised on startup; SIGUSR1 rotates it,
+ * which simulates an upstream restart that wiped its session table.
+ * Requests bearing the previous session id then receive 400 — the
+ * canonical session-loss shape — and the wrapper must transparently
+ * re-initialise. */
+static char current_session_id[64] = "sess-fake-1";
 
 static void handle_sig(int s) {
     (void)s;
     stopping = 1;
+}
+
+static void handle_rotate(int s) {
+    (void)s;
+    rotate_session = 1;
+}
+
+static void rotate_session_now(void) {
+    static int gen = 1;
+    gen++;
+    snprintf(current_session_id, sizeof(current_session_id),
+             "sess-fake-%d", gen);
+    rotate_session = 0;
 }
 
 /* Stderr-verbose logger. Plain function to avoid the GNU-only
@@ -67,6 +88,39 @@ static int write_all(int fd, const void *buf, size_t n) {
         return -1;
     }
     return 0;
+}
+
+/* Extract the MCP-Session-Id header value, if any, into out (cap-1
+ * bytes max, NUL-terminated). out is empty if the header is absent.
+ * Header parsing is line-based and case-insensitive on the name. */
+static void parse_session_id(const char *hdr, size_t n,
+                             char *out, size_t cap) {
+    out[0] = '\0';
+    const char *p = hdr;
+    const char *end = hdr + n;
+    const char key[] = "mcp-session-id:";
+    size_t klen = sizeof(key) - 1;
+    while (p < end) {
+        const char *eol = memchr(p, '\n', (size_t)(end - p));
+        if (eol == NULL) break;
+        if ((size_t)(eol - p) > klen
+         && strncasecmp(p, key, klen) == 0) {
+            const char *v = p + klen;
+            while (v < eol && (*v == ' ' || *v == '\t')) v++;
+            const char *vend = eol;
+            while (vend > v
+                && (vend[-1] == '\r' || vend[-1] == ' '
+                 || vend[-1] == '\t' || vend[-1] == '\n')) {
+                vend--;
+            }
+            size_t vlen = (size_t)(vend - v);
+            if (vlen >= cap) vlen = cap - 1;
+            memcpy(out, v, vlen);
+            out[vlen] = '\0';
+            return;
+        }
+        p = eol + 1;
+    }
 }
 
 /* Read until CRLF-CRLF; returns 0 success, -1 on error/EOF.
@@ -134,10 +188,11 @@ static void send_initialize_response(int cfd, cJSON *req_id) {
     int n = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: application/json\r\n"
-        "MCP-Session-Id: sess-fake\r\n"
+        "MCP-Session-Id: %s\r\n"
         "Content-Length: %zu\r\n"
         "Connection: close\r\n"
         "\r\n",
+        current_session_id,
         blen);
     write_all(cfd, hdr, (size_t)n);
     if (body != NULL && blen > 0) {
@@ -216,6 +271,9 @@ static void serve_one(int cfd) {
     int clen = parse_content_length(hbuf, hend);
     if (clen < 0) clen = 0;
 
+    char incoming_sid[64];
+    parse_session_id(hbuf, hend, incoming_sid, sizeof(incoming_sid));
+
     char *body = malloc((size_t)clen + 1);
     int have = (int)(total - hend);
     if (have > 0) {
@@ -244,8 +302,35 @@ static void serve_one(int cfd) {
 
     logv("request: method=%s", method);
 
+    /* Reject any non-initialize request whose session id doesn't
+     * match the current one. This is the canonical session-loss
+     * shape — what mcp-go's session middleware does after a restart.
+     * SIGUSR1 to this process rotates current_session_id, which from
+     * the wrapper's perspective is indistinguishable from a real
+     * upstream restart. */
+    if (strcmp(method, "initialize") != 0
+     && incoming_sid[0] != '\0'
+     && strcmp(incoming_sid, current_session_id) != 0) {
+        logv("response: 400 (session id %s does not match current %s)",
+             incoming_sid, current_session_id);
+        const char err_body[] = "Bad Request: Invalid session ID";
+        char hdr[256];
+        int hn = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            sizeof(err_body) - 1);
+        write_all(cfd, hdr, (size_t)hn);
+        write_all(cfd, err_body, sizeof(err_body) - 1);
+        cJSON_Delete(parsed);
+        return;
+    }
+
     if (strcmp(method, "initialize") == 0) {
-        logv("response: initialize (200 OK + session id)");
+        logv("response: initialize (200 OK + session id %s)",
+             current_session_id);
         send_initialize_response(cfd, id_node);
     } else if (method[0] == '\0') {
         logv("response: no method (202)");
@@ -297,6 +382,9 @@ int main(int argc, char **argv) {
     sa.sa_handler = handle_sig;
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT,  &sa, NULL);
+    struct sigaction sr = {0};
+    sr.sa_handler = handle_rotate;
+    sigaction(SIGUSR1, &sr, NULL);
     struct sigaction ign = {0};
     ign.sa_handler = SIG_IGN;
     sigaction(SIGPIPE, &ign, NULL);
@@ -323,6 +411,11 @@ int main(int argc, char **argv) {
     logv("listening on 127.0.0.1:%d", bound);
 
     while (!stopping) {
+        if (rotate_session) {
+            rotate_session_now();
+            logv("session id rotated to %s (SIGUSR1)",
+                 current_session_id);
+        }
         int cfd = accept(srv, NULL, NULL);
         if (cfd < 0) {
             if (errno == EINTR) continue;

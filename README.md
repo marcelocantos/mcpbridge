@@ -90,6 +90,42 @@ client has been restarted.
 If you use an agentic coding tool, include
 [agents-guide.md](agents-guide.md) in your project context.
 
+## Resilience
+
+mcpbridge keeps your agent's MCP session alive across upstream
+restarts. The agent's stdio session is the source of truth; the
+upstream MCP server is a replaceable component behind it.
+
+There are two restart paths, both invisible to the agent:
+
+- **Daemon-driven reload.** When `mcpbridge-daemon` notices a newer
+  version of the upstream is installed (e.g. via `brew upgrade`), it
+  broadcasts a reload to every connected wrapper. The wrapper drains
+  its in-flight requests, restarts the upstream, replays the cached
+  `initialize` + `notifications/initialized` against the new instance,
+  and resumes — without the agent ever seeing a disconnect or having
+  to re-issue a request.
+
+- **Autonomous self-reload.** When the upstream restarts on its own
+  (a manual `brew services restart`, a crash, an HTTP server cycling)
+  it forgets the wrapper's session id. The next request comes back as
+  `400 Bad Request: Invalid session ID`. mcpbridge detects this,
+  re-runs the cached handshake against the upstream (capturing a
+  fresh session id), and replays the in-flight request that triggered
+  the failure. The agent sees one extra round-trip of latency on that
+  call and nothing else.
+
+Both paths emit `notifications/tools/list_changed`,
+`prompts/list_changed`, and `resources/list_changed` to the agent
+after the re-handshake, so the agent re-fetches its tool / prompt /
+resource registry against the (possibly upgraded) upstream — no
+client restart needed.
+
+What is **not** currently resilient: a permanently unreachable
+upstream (TCP connect fails repeatedly). In that case mcpbridge
+exits and the agent's MCP session ends. Configurable dead-upstream
+timeout with stdio-client preservation is planned — see 🎯T7.1.
+
 ## Status
 
 Work in progress. See `bullseye.yaml` for the roadmap.

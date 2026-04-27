@@ -39,13 +39,30 @@
 
 struct mcp_msg;
 
+/* send_child return codes. The to-child path can fail in two
+ * fundamentally different ways: a recoverable session-loss (the
+ * upstream MCP server's session id is no longer recognised — typical
+ * after the upstream restarts) or a fatal transport error. The two
+ * cases need different handling: stale triggers a transparent re-init,
+ * fatal kills the wrapper. */
+#define DISPATCH_SEND_OK     0
+#define DISPATCH_SEND_STALE -1
+#define DISPATCH_SEND_FATAL -2
+
 /* Callbacks the dispatch layer uses to emit its decisions. The ctx
  * pointer is passed back unchanged on every call. */
 struct dispatch_sink {
     /* Write bytes to the upstream agent (the MCP client). */
     void (*send_upstream)(void *ctx, const void *bytes, size_t n);
-    /* Write bytes to the current child transport. */
-    void (*send_child)(void *ctx, const void *bytes, size_t n);
+    /* Write bytes to the current child transport. Returns one of the
+     * DISPATCH_SEND_* codes. STALE means "the upstream rejected this
+     * request because its session id is no longer valid; please
+     * re-initialise and retry" — dispatch handles this by undoing
+     * the in-flight increment, requeuing the message bytes, and
+     * emitting RELOAD_REQUESTED so the existing reload pathway
+     * re-establishes the session and the queue drains automatically
+     * once RUNNING is restored. FATAL aborts the wrapper. */
+    int  (*send_child)(void *ctx, const void *bytes, size_t n);
     /* Raise an FSM event (e.g. INITIALIZE_OK, IN_FLIGHT_ZERO). */
     void (*emit_event)(void *ctx, enum fsm_event ev);
     void *ctx;

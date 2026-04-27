@@ -854,6 +854,27 @@ static int http_post_once(struct http_self *h,
         return -1;
     }
     if (resp.status < 200 || resp.status >= 300) {
+        /* Distinguish "session is no longer valid" (recoverable) from
+         * other non-2xx (fatal). Session loss is the canonical 4xx
+         * response shape used by mcp-go's session middleware and by
+         * the MCP spec — typically 400 with a body of "Bad Request:
+         * Invalid session ID", or 404 if the server's session table
+         * was wiped on restart. Treat any 4xx with a session id
+         * already in flight as stale: the upstream lost track of us,
+         * and the wrapper's reinit path can recover transparently.
+         * Without a session id (the very first request), 4xx is a
+         * genuine error — we have nothing to re-handshake from. */
+        int stale = (resp.status >= 400 && resp.status < 500
+                  && h->session_id[0] != '\0');
+        if (stale) {
+            log_info("http: status %d from %s with active session "
+                     "id; upstream session is stale, signalling "
+                     "reinit", resp.status, h->url.path);
+            h->session_id[0] = '\0';
+            close(fd);
+            errno = ESTALE;
+            return -1;
+        }
         log_error("http: non-2xx status %d from POST %s",
                   resp.status, h->url.path);
         close(fd);

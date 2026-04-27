@@ -40,9 +40,13 @@ struct dispatch {
     struct queued_msg *queue_tail;
 };
 
-static void send_raw_with_newline(const struct dispatch_sink *sink,
-                                  int to_child,
-                                  const void *bytes, size_t n) {
+/* Returns DISPATCH_SEND_OK / _STALE / _FATAL when to_child is set;
+ * always DISPATCH_SEND_OK for the upstream direction (failures there
+ * abort the wrapper synchronously inside the sink and never surface
+ * as a return code). */
+static int send_raw_with_newline(const struct dispatch_sink *sink,
+                                 int to_child,
+                                 const void *bytes, size_t n) {
     /* The parser strips the trailing newline from the raw bytes.
      * When we forward, we need to re-append it so the downstream
      * framing is correct. We deliver the whole message (bytes +
@@ -53,12 +57,14 @@ static void send_raw_with_newline(const struct dispatch_sink *sink,
     char *scratch = xmalloc(n + 1);
     memcpy(scratch, bytes, n);
     scratch[n] = '\n';
+    int rc = DISPATCH_SEND_OK;
     if (to_child) {
-        sink->send_child(sink->ctx, scratch, n + 1);
+        rc = sink->send_child(sink->ctx, scratch, n + 1);
     } else {
         sink->send_upstream(sink->ctx, scratch, n + 1);
     }
     free(scratch);
+    return rc;
 }
 
 static void enqueue(struct dispatch *d, const void *bytes, size_t n) {
@@ -197,7 +203,28 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
         if (m->kind == MCP_KIND_REQUEST) {
             d->in_flight++;
         }
-        send_raw_with_newline(&d->sink, 1 /* to_child */, m->raw, m->raw_len);
+        int rc = send_raw_with_newline(&d->sink, 1 /* to_child */,
+                                       m->raw, m->raw_len);
+        if (rc == DISPATCH_SEND_STALE) {
+            /* Session was invalidated mid-flight (e.g. the upstream
+             * MCP server restarted and rejected our session id). The
+             * request never reached a state where the upstream could
+             * answer it. Undo the in-flight count, queue the bytes
+             * for replay, and trigger a reload — the existing reload
+             * pathway re-handshakes the upstream (capturing a fresh
+             * session id) and the drain on RUNNING re-sends the
+             * queued message under the new session. The agent sees
+             * a brief latency bump and a single response, never an
+             * error. */
+            if (m->kind == MCP_KIND_REQUEST) {
+                d->in_flight--;
+            }
+            log_info("dispatch: session stale; queuing %s for replay "
+                     "after re-init",
+                     m->method != NULL ? m->method : "(notification)");
+            enqueue(d, m->raw, m->raw_len);
+            d->sink.emit_event(d->sink.ctx, FSM_EV_RELOAD_REQUESTED);
+        }
         return;
     }
 
