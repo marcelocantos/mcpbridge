@@ -141,6 +141,8 @@ test: $(TEST_BINS) $(BIN) $(TEST_HELPERS)
 	@./tests/e2e_http_reload_test.sh
 	@echo "==> tests/e2e_http_session_invalid_test.sh"
 	@./tests/e2e_http_session_invalid_test.sh
+	@echo "==> tests/e2e_http_dead_upstream_test.sh"
+	@./tests/e2e_http_dead_upstream_test.sh
 
 clean:
 	rm -f $(BIN) $(MAIN_OBJS) $(TEST_BINS) $(TEST_HELPERS) \

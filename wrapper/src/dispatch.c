@@ -205,6 +205,32 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
         }
         int rc = send_raw_with_newline(&d->sink, 1 /* to_child */,
                                        m->raw, m->raw_len);
+        if (rc == DISPATCH_SEND_TIMEOUT) {
+            /* The upstream stayed unreachable past the per-tool-call
+             * timeout. Synthesise a structured JSON-RPC error to
+             * the agent so it sees a normal failure for THIS call,
+             * and keep the wrapper alive — the next call resumes
+             * normal flow as soon as the upstream comes back
+             * (🎯T7.1). Notifications have no id; we just drop them
+             * and log. */
+            if (m->kind == MCP_KIND_REQUEST) {
+                d->in_flight--;
+                size_t elen = 0;
+                char *err = mcp_build_error_response(
+                    &m->id, -32001,
+                    "mcpbridge: upstream unreachable past timeout",
+                    &elen);
+                if (err != NULL) {
+                    d->sink.send_upstream(d->sink.ctx, err, elen);
+                    free(err);
+                }
+            } else {
+                log_warn("dispatch: dropped %s notification (upstream "
+                         "unreachable past timeout)",
+                         m->method != NULL ? m->method : "(unknown)");
+            }
+            return;
+        }
         if (rc == DISPATCH_SEND_STALE) {
             /* Session was invalidated mid-flight (e.g. the upstream
              * MCP server restarted and rejected our session id). The
@@ -368,6 +394,40 @@ void dispatch_on_state_change(struct dispatch *d, enum fsm_state new_state) {
     }
 }
 
+/* Drain every queued upstream message, synthesising a JSON-RPC
+ * error for each REQUEST and dropping notifications. Used when a
+ * recovery cycle gives up because the upstream is unreachable past
+ * the per-call timeout — the agent sees a structured failure for
+ * each call that was waiting on the recovery, and the wrapper stays
+ * up so subsequent calls can try again.
+ *
+ * The error message is opaque to dispatch; the caller supplies it
+ * because the *reason* differs by recovery path (timeout vs failed
+ * handshake). */
+static void drain_queue_with_error(struct dispatch *d,
+                                   int code,
+                                   const char *message) {
+    struct queued_msg *q;
+    while ((q = dequeue(d)) != NULL) {
+        struct mcp_msg m = {0};
+        if (mcp_msg_parse(q->bytes, q->len, &m) == MCP_PARSE_OK
+         && m.kind == MCP_KIND_REQUEST) {
+            size_t elen = 0;
+            char *err = mcp_build_error_response(&m.id, code, message,
+                                                 &elen);
+            if (err != NULL) {
+                d->sink.send_upstream(d->sink.ctx, err, elen);
+                free(err);
+            }
+        } else {
+            log_warn("dispatch: dropping queued %s during error drain",
+                     m.method != NULL ? m.method : "(unparseable)");
+        }
+        mcp_msg_free(&m);
+        queued_msg_free(q);
+    }
+}
+
 int dispatch_replay_initialize(struct dispatch *d) {
     if (d == NULL || d->cached_init_req == NULL) {
         return 0;
@@ -375,8 +435,26 @@ int dispatch_replay_initialize(struct dispatch *d) {
     /* Send the cached initialize request. We count this as one
      * in-flight request so the bookkeeping stays consistent with
      * how we handle real requests. */
-    send_raw_with_newline(&d->sink, 1 /* to_child */,
-                          d->cached_init_req, d->cached_init_req_len);
+    int rc = send_raw_with_newline(&d->sink, 1 /* to_child */,
+                                   d->cached_init_req,
+                                   d->cached_init_req_len);
+    if (rc == DISPATCH_SEND_TIMEOUT) {
+        /* The upstream did not return within the per-call timeout
+         * even for the initialize handshake. Abort the recovery:
+         * synthesise a structured error for every queued upstream
+         * request (the calls that were waiting on this recovery)
+         * and let the caller transition the FSM back to RUNNING.
+         * The wrapper stays alive; the next agent request triggers
+         * a fresh recovery cycle. 🎯T7.1. */
+        log_warn("dispatch: replay initialize timed out; "
+                 "draining %s queue with errors",
+                 d->queue_head != NULL ? "non-empty" : "empty");
+        drain_queue_with_error(d, -32001,
+            "mcpbridge: upstream unreachable past timeout during reinit");
+        /* No bytes landed, so no response is coming — don't leave
+         * replay_pending set; don't bump in_flight. */
+        return -1;
+    }
     d->in_flight++;
     d->replay_pending = 1;
 

@@ -437,3 +437,45 @@ char *mcp_build_list_changed(const char *kind, size_t *out_len) {
     }
     return buf;
 }
+
+char *mcp_build_error_response(const struct mcp_id *id,
+                               int code,
+                               const char *message,
+                               size_t *out_len) {
+    if (id == NULL || message == NULL) {
+        return NULL;
+    }
+    if (id->tag == MCP_ID_NONE) {
+        /* Notifications have no id; there is no valid error response
+         * to send back. The caller is expected to drop the message
+         * and log instead. */
+        return NULL;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) return NULL;
+    cJSON_AddStringToObject(root, "jsonrpc", "2.0");
+    if (id->tag == MCP_ID_INT) {
+        cJSON_AddNumberToObject(root, "id", (double)id->v.i);
+    } else {
+        cJSON_AddStringToObject(root, "id", id->v.s);
+    }
+    cJSON *err = cJSON_CreateObject();
+    cJSON_AddNumberToObject(err, "code", (double)code);
+    cJSON_AddStringToObject(err, "message", message);
+    cJSON_AddItemToObject(root, "error", err);
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == NULL) return NULL;
+
+    size_t jlen = strlen(json);
+    char *buf = xmalloc(jlen + 1);
+    memcpy(buf, json, jlen);
+    buf[jlen] = '\n';
+    free(json);
+    if (out_len != NULL) {
+        *out_len = jlen + 1;
+    }
+    return buf;
+}

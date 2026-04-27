@@ -39,9 +39,22 @@ struct config {
     /* Http backend. Owned by the config. */
     char *url;
 
+    /* Per-tool-call timeout (milliseconds). Bounds how long any
+     * single tool call may wait for the upstream — including any
+     * connect-retry-with-backoff loops triggered by a transient
+     * outage. Default 300000 (5 minutes). 0 means "no per-call
+     * timeout" (retries until the agent kills the wrapper). The
+     * timeout is only consulted while there is an in-flight call
+     * — an idle wrapper does no upstream I/O and therefore needs no
+     * deadline. See 🎯T7.1. */
+    int tool_call_timeout_ms;
+
     /* Source path the config came from (for diagnostics). Owned. */
     char *source_path;
 };
+
+/* Default for tool_call_timeout_ms when the config omits it. */
+#define CONFIG_DEFAULT_TOOL_CALL_TIMEOUT_MS 300000
 
 /* config_load reads `path`, parses it as a v2 config, validates the
  * connection shape, and returns a freshly-allocated struct config*.

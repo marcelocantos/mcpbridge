@@ -43,4 +43,13 @@
  * Free with transport_destroy(). */
 struct transport *transport_http_new(const char *url);
 
+/* Set the per-tool-call timeout (milliseconds). Bounds how long any
+ * single send() may wait for the upstream — including any retry
+ * loop triggered by transient connect failures. 0 means "no timeout"
+ * (retry indefinitely). Default 300000 (5 minutes). See 🎯T7.1.
+ *
+ * Safe to call before or after transport_start. The new timeout
+ * takes effect on the next send. */
+void transport_http_set_call_timeout(struct transport *t, int timeout_ms);
+
 #endif /* MCPBRIDGE_TRANSPORT_HTTP_H */

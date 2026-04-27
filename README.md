@@ -121,10 +121,31 @@ after the re-handshake, so the agent re-fetches its tool / prompt /
 resource registry against the (possibly upgraded) upstream — no
 client restart needed.
 
-What is **not** currently resilient: a permanently unreachable
-upstream (TCP connect fails repeatedly). In that case mcpbridge
-exits and the agent's MCP session ends. Configurable dead-upstream
-timeout with stdio-client preservation is planned — see 🎯T7.1.
+- **Outage tolerance.** While there's no in-flight tool call, the
+  wrapper is silent — it doesn't poll the upstream and it doesn't
+  time out the agent's session. Outages of arbitrary length pass
+  unnoticed, and the next tool call after the upstream comes back
+  succeeds via the autonomous-self-reload path. While a tool call
+  is waiting, the wrapper retries the upstream connect with
+  bounded backoff (100ms → 5s, capped) for up to the configured
+  per-call timeout. If the timeout elapses before the upstream
+  returns, mcpbridge synthesises a structured JSON-RPC error for
+  that one call and keeps the agent's session alive — subsequent
+  tool calls just try again.
+
+The per-call timeout is configurable in the schema-v2 config file:
+
+```json
+{
+  "schema": 2,
+  "name": "my-server",
+  "url": "http://localhost:19000/mcp",
+  "tool_call_timeout_ms": 300000
+}
+```
+
+Default: 5 minutes. Set to `0` to retry forever (the agent's own
+timeout becomes the safety valve).
 
 ## Status
 

@@ -45,9 +45,10 @@ struct mcp_msg;
  * after the upstream restarts) or a fatal transport error. The two
  * cases need different handling: stale triggers a transparent re-init,
  * fatal kills the wrapper. */
-#define DISPATCH_SEND_OK     0
-#define DISPATCH_SEND_STALE -1
-#define DISPATCH_SEND_FATAL -2
+#define DISPATCH_SEND_OK      0
+#define DISPATCH_SEND_STALE  -1
+#define DISPATCH_SEND_FATAL  -2
+#define DISPATCH_SEND_TIMEOUT -3
 
 /* Callbacks the dispatch layer uses to emit its decisions. The ctx
  * pointer is passed back unchanged on every call. */
@@ -97,9 +98,19 @@ void dispatch_on_state_change(struct dispatch *d, enum fsm_state new_state);
  * to the replayed initialize is consumed by the wrapper rather than
  * forwarded upstream.
  *
- * Returns 1 if bytes were sent, 0 if no initialize has been cached
- * yet (in which case the caller should fall back to whatever first-
- * time initialization flow it knows). */
+ * Returns:
+ *   1  bytes sent; the wrapper should wait for the response and
+ *      transition the FSM to RUNNING when it arrives.
+ *   0  no initialize has been cached yet — the caller should fall
+ *      back to whatever first-time initialization flow it knows.
+ *  -1  the send was attempted but the upstream stayed unreachable
+ *      past the per-tool-call timeout (🎯T7.1). dispatch has
+ *      already drained any queued requests with synthesised
+ *      JSON-RPC error responses so the agent saw a normal failure
+ *      for each waiting call. The caller MUST keep the wrapper
+ *      alive — transition the FSM back to RUNNING so the next
+ *      agent request can trigger a fresh recovery, and treat the
+ *      cached session id as gone (which it already is). */
 int dispatch_replay_initialize(struct dispatch *d);
 
 /* Current in-flight request count, for tests and observability. */
