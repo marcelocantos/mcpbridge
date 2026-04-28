@@ -919,3 +919,59 @@ targets:
     - release-friction
     origin: forked-from T7 (2026-04-27)
     discovered: 2026-04-27
+  T8:
+    name: watcher does not lstat HTTP-backend URLs as filesystem paths
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    actual_cost: 2.0
+    acceptance:
+    - 'For configs whose backend is a URL (schema-v2 `url` field, no `command`), mcpbridge-daemon''s watcher does not call `lstat` on the URL string. Specifically, `/opt/homebrew/var/log/mcpbridge-daemon.log` no longer contains lines like `watcher: track failed name=spyder path=http://localhost:3030/mcp err="lstat /http:/localhost:3030: no such file or directory"`.'
+    - URL-backed bridges (e.g. spyder at http://localhost:3030/mcp, mnemo at http://localhost:19419/mcp) are still registered in the daemon and proxied successfully — the change is to skip the filesystem-watch step, not to reject URL backends.
+    - If watching the binary that fronts a URL backend is meaningful (e.g. the homebrew-installed binary backing `brew services start spyder`), the watcher resolves *that* path via the config's `source.formula` lookup, not by lstat'ing the URL string.
+    - Stdio-backed bridges (e.g. bullseye, doit, vellum) continue to have their child binary path watched as before — the fix is URL-specific.
+    - A regression test pins the `lstat` skip — given a v2 config with `url` and no `command`, the watcher emits no `track failed` warning and registers the conn cleanly.
+    context: |-
+      Observed in mcpbridge 0.6.0 against ~/.config/mcpbridge/spyder.json (and mnemo.json, sawmill.json — every HTTP-backend config). Daemon log shows on every connect:
+
+        level=WARN msg="watcher: track failed" name=spyder path=http://localhost:3030/mcp err="lstat /http:/localhost:3030: no such file or directory"
+
+      The path is the URL string with `path.Clean`-style slash collapse (`http://localhost:3030/mcp` → `/http:/localhost:3030`), then lstat'd as a file. The fix is to detect URL-shaped backends in the watcher and skip the filesystem watch entirely (or watch the source binary if available via `source.formula`). Surfaced during the v0.26.0 spyder release when `brew services restart spyder` severed an active Jevons MCP session — the watcher bug means mcpbridge isn't catching backend upgrades for HTTP backends, so the agent never sees a clean cycle.
+
+      Affected: every bridge whose config has `url` instead of `command`. Currently spyder, mnemo, sawmill — anything that uses HTTP MCP transport.
+    origin: discovered while diagnosing spyder v0.26.0 Jevons disconnect (2026-04-28)
+    discovered: 2026-04-28
+    achieved: 2026-04-29
+  T9:
+    name: HTTP-backend agent sessions survive backend daemon restart
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    actual_cost: 3.0
+    acceptance:
+    - When the upstream HTTP MCP backend (e.g. spyder serve, mnemo, sawmill) is restarted while an agent session is connected via mcpbridge, the agent's MCP session continues working without the agent observing a hard disconnect or having to restart its session.
+    - 'Specifically: a `brew services restart <project>` (or equivalent SIGTERM/relaunch of the backend) causes mcpbridge to detect the upstream is gone, wait for the new backend to be ready, re-issue an `initialize` against it, restore any tool-result subscriptions the agent had open, and resume the session under a fresh upstream `mcp-session-id` while keeping the agent-facing session ID stable.'
+    - In-flight tool calls during the restart window either complete (if mcpbridge can replay them safely against the new backend) or surface as a single recoverable error to the agent rather than a session-fatal disconnect. Idempotent reads (e.g. list_tools, list_resources) MUST be replayed transparently. Side-effecting writes (e.g. launch_app) MUST surface a structured error rather than be silently re-issued.
+    - 'Daemon log emits a structured `upstream: cycling` line covering the restart window (start of cycle, first failed probe, backend back up, re-init complete, agent session resumed) so post-mortems are tractable.'
+    - 'A regression test simulates the cycle: spawn a fake HTTP MCP backend, register an mcpbridge conn against it, kill+restart the backend, verify the agent-facing session continues to receive responses without a hard reconnect.'
+    context: |-
+      Observed during the spyder v0.26.0 release (2026-04-28). After `brew services restart spyder` ran as part of the install step, an active Claude Code agent session (working with the Jevons iPad via spyder MCP) lost its connection. Investigation showed that:
+
+      1. mcpbridge is wired between the agent and spyder (~/.config/mcpbridge/spyder.json points at http://localhost:3030/mcp).
+      2. The mcpbridge watcher bug (T8) means the cycle was never detected by mcpbridge automatically.
+      3. Even with the watcher fixed, the deeper issue is that streamable-HTTP MCP sessions carry an `mcp-session-id` that is in-memory on the server. A new backend daemon doesn't know the old session ID, so any subsequent agent call returns a session-not-found error and the agent treats the session as dead.
+
+      The mcpbridge value proposition is "the agent always talks to mcpbridge over stdio; mcpbridge bridges the session and cycles the backend when mcpbridge-daemon tells it a newer version is installed — invisibly to the agent's MCP session" (from --help-agent). For HTTP backends with in-memory session state, "invisibly" requires mcpbridge to:
+      - Detect the upstream cycle (currently broken by T8 for URL backends).
+      - Re-issue `initialize` against the new backend.
+      - Reconcile per-tool state (subscriptions, etc.) the agent had open.
+      - Replay or fail-with-context any in-flight tool call.
+
+      Stdio backends already get this for free because mcpbridge owns the child process lifecycle. HTTP backends need explicit support. T8 is a prerequisite (without the watcher firing, mcpbridge never knows the cycle happened); this target is the structural follow-up that makes the cycle invisible end-to-end.
+
+      Out of scope: persistent server-side session IDs (that would be a fix on the backend side, e.g. spyder serializing `mcp-session-id`s — which loses information mid-call anyway). The right architectural choice is for mcpbridge to absorb the session-reset shock.
+    depends_on:
+    - T8
+    origin: discovered while diagnosing spyder v0.26.0 Jevons disconnect (2026-04-28); paired with T8
+    discovered: 2026-04-28
+    achieved: 2026-04-29
