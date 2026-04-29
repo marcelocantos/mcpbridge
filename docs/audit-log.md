@@ -7,7 +7,7 @@ format.
 
 ## 2026-04-28 — /release v0.7.0
 
-- **Commit**: `pending`
+- **Commit**: `7945b8f`
 - **Outcome**: HTTP-backend resilience refinements surfaced during
   the spyder v0.26.0 release. Ships 🎯T8 (daemon watcher no longer
   lstat()s HTTP-backend URLs as filesystem paths — wrapper reports
