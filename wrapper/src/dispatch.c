@@ -155,6 +155,43 @@ static void capture_raw(char **dst, size_t *dst_len,
 
 /* ---------- Upstream (agent -> wrapper -> child) ---------- */
 
+/* MCP methods that are safe to replay against a freshly re-handshaken
+ * upstream. ESTALE only fires when the upstream rejected the request
+ * with a 4xx before processing it — but mcpbridge cannot prove that
+ * property in general for arbitrary servers, so it limits automatic
+ * replay to methods whose contract is explicitly read-only. Side-
+ * effecting requests (notably tools/call and sampling/createMessage)
+ * are surfaced to the agent as a structured recoverable error so the
+ * agent can decide whether retrying is appropriate. */
+static int is_replay_safe_method(const char *method) {
+    if (method == NULL) {
+        return 0;
+    }
+    static const char *const safe[] = {
+        "initialize",
+        "notifications/initialized",
+        "ping",
+        "tools/list",
+        "prompts/list",
+        "prompts/get",
+        "resources/list",
+        "resources/read",
+        "resources/templates/list",
+        "resources/subscribe",
+        "resources/unsubscribe",
+        "roots/list",
+        "logging/setLevel",
+        "completion/complete",
+    };
+    size_t n = sizeof(safe) / sizeof(safe[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(method, safe[i]) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* The initialize handshake is special: the client always sends
  * `initialize` first, and the FSM is in STARTING precisely until
  * that round-trip completes. If we queued it like any other request
@@ -235,20 +272,46 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
             /* Session was invalidated mid-flight (e.g. the upstream
              * MCP server restarted and rejected our session id). The
              * request never reached a state where the upstream could
-             * answer it. Undo the in-flight count, queue the bytes
-             * for replay, and trigger a reload — the existing reload
-             * pathway re-handshakes the upstream (capturing a fresh
-             * session id) and the drain on RUNNING re-sends the
-             * queued message under the new session. The agent sees
-             * a brief latency bump and a single response, never an
-             * error. */
+             * answer it. Undo the in-flight count and trigger a
+             * reload — the existing reload pathway re-handshakes the
+             * upstream (capturing a fresh session id).
+             *
+             * Idempotent reads (tools/list, resources/read, etc.) get
+             * queued for transparent replay after the new handshake.
+             * Side-effecting requests (tools/call,
+             * sampling/createMessage, anything mcpbridge can't prove
+             * read-only) surface a structured recoverable error to
+             * the agent rather than being silently re-issued — even
+             * though the upstream's 4xx implies the request was not
+             * processed, mcpbridge cannot guarantee that across
+             * arbitrary backends, and silently retrying writes
+             * violates the agent's expectation of at-most-once
+             * delivery for tool calls. */
             if (m->kind == MCP_KIND_REQUEST) {
                 d->in_flight--;
             }
-            log_info("dispatch: session stale; queuing %s for replay "
-                     "after re-init",
-                     m->method != NULL ? m->method : "(notification)");
-            enqueue(d, m->raw, m->raw_len);
+            int replay = (m->kind == MCP_KIND_NOTIFICATION)
+                      || is_replay_safe_method(m->method);
+            if (replay) {
+                log_info("upstream: cycling — session stale; queuing %s "
+                         "for replay after re-init",
+                         m->method != NULL ? m->method : "(notification)");
+                enqueue(d, m->raw, m->raw_len);
+            } else {
+                log_info("upstream: cycling — session stale; surfacing "
+                         "recoverable error for %s (not safe to replay)",
+                         m->method);
+                size_t elen = 0;
+                char *err = mcp_build_error_response(
+                    &m->id, -32002,
+                    "mcpbridge: upstream session reset during call; "
+                    "please retry",
+                    &elen);
+                if (err != NULL) {
+                    d->sink.send_upstream(d->sink.ctx, err, elen);
+                    free(err);
+                }
+            }
             d->sink.emit_event(d->sink.ctx, FSM_EV_RELOAD_REQUESTED);
         }
         return;

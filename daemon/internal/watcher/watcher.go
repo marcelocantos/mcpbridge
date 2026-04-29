@@ -14,6 +14,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,15 +120,30 @@ func (w *Watcher) Close() error {
 }
 
 // OnRegister implements socket.RegistrationHandler. It starts
-// watching the wrapper's child_binary path (if any).
+// watching the wrapper's child_binary path (if any). HTTP-backend
+// wrappers report their upstream URL here; there is nothing on the
+// local filesystem to watch, so URL-shaped values are skipped
+// silently.
 func (w *Watcher) OnRegister(name, childBinary string) {
 	if childBinary == "" {
+		return
+	}
+	if isURL(childBinary) {
+		slog.Debug("watcher: skipping URL backend",
+			"name", name, "url", childBinary)
 		return
 	}
 	if err := w.Track(name, childBinary); err != nil {
 		slog.Warn("watcher: track failed",
 			"name", name, "path", childBinary, "err", err)
 	}
+}
+
+// isURL reports whether s is an http(s) URL rather than a filesystem
+// path. The watcher uses this to skip tracking HTTP-backend wrappers,
+// whose register envelope reports the upstream URL in child_binary.
+func isURL(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
 }
 
 // OnDeregister implements socket.RegistrationHandler. It stops

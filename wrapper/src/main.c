@@ -184,6 +184,12 @@ struct loop_ctx {
     /* Reload bookkeeping. */
     uint64_t pending_reload_seq; /* seq of the reload envelope we are
                                     currently handling, 0 if none */
+    int autonomous_cycle;        /* 1 while a wrapper-initiated cycle
+                                    (typically ESTALE-triggered) is in
+                                    flight; cleared when we return to
+                                    RUNNING. Drives the paired
+                                    `upstream: cycling — complete` log
+                                    line. */
 
     /* Daemon reconnect backoff (all in monotonic ms). */
     long long next_reconnect_at;
@@ -297,6 +303,22 @@ static void sink_emit_event(void *ctx, enum fsm_event ev) {
                 log_info("reload complete; ack sent");
             }
             c->pending_reload_seq = 0;
+        }
+
+        /* Autonomous cycle bookkeeping. A cycle starts when the FSM
+         * leaves RUNNING (typically via FSM_EV_RELOAD_REQUESTED
+         * triggered by an ESTALE on the upstream HTTP transport) and
+         * ends when it returns to RUNNING. Daemon-driven reloads are
+         * already covered by the `reload complete; ack sent` line
+         * above, so we suppress the autonomous marker when a
+         * pending_reload_seq is in flight. */
+        if (old == FSM_RUNNING && new_state != FSM_RUNNING
+         && c->pending_reload_seq == 0) {
+            c->autonomous_cycle = 1;
+        }
+        if (new_state == FSM_RUNNING && c->autonomous_cycle) {
+            c->autonomous_cycle = 0;
+            log_info("upstream: cycling — complete; agent session resumed");
         }
     }
 
@@ -812,7 +834,10 @@ int main(int argc, char **argv) {
             return 1;
         }
         transport_http_set_call_timeout(t, cfg->tool_call_timeout_ms);
-        child_bin = cfg->url;
+        /* HTTP backends have no child binary on the local filesystem
+         * for the daemon's watcher to track. Reporting the URL here
+         * caused the daemon to lstat() the URL string as a path. */
+        child_bin = NULL;
         break;
     default:
         log_error("invalid config backend %d (this should not happen)",
@@ -840,6 +865,7 @@ int main(int argc, char **argv) {
         .sock_path          = resolve_daemon_socket_path(cli_sock),
         .child_bin          = child_bin,
         .pending_reload_seq = 0,
+        .autonomous_cycle   = 0,
         .next_reconnect_at  = 0,
         .backoff_ms         = 0,
         .exit_requested     = 0,
