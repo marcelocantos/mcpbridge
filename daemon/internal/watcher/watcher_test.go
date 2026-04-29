@@ -169,6 +169,27 @@ func TestWatcher_UntrackStopsFiring(t *testing.T) {
 	}
 }
 
+func TestWatcher_OnRegisterSkipsURLBackend(t *testing.T) {
+	// HTTP-backend wrappers (schema-v2 `url`, no `command`) report
+	// their upstream URL as child_binary. The watcher must skip the
+	// filesystem-watch step rather than lstat'ing the URL string.
+	bc := &fakeBcast{}
+	w, _ := startWatcher(t, bc)
+
+	for _, url := range []string{
+		"http://localhost:3030/mcp",
+		"https://example.com/mcp",
+	} {
+		w.OnRegister("urlbackend", url)
+		w.mu.Lock()
+		_, tracked := w.byName["urlbackend"]
+		w.mu.Unlock()
+		if tracked {
+			t.Errorf("OnRegister(%q) should not have tracked a URL", url)
+		}
+	}
+}
+
 func TestWatcher_OnRegisterAndOnDeregisterBridge(t *testing.T) {
 	// Verifies the RegistrationHandler surface: OnRegister starts
 	// tracking, OnDeregister stops it.

@@ -606,7 +606,8 @@ static void test_replay_error_no_list_changed(void) {
 }
 
 static void test_stale_send_requeues_and_triggers_reload(void) {
-    /* When send_child returns STALE while RUNNING, dispatch must:
+    /* When send_child returns STALE while RUNNING for an idempotent
+     * read (here: tools/list), dispatch must:
      *   - undo the in-flight increment (the request never landed)
      *   - put the message bytes back in the queue
      *   - emit RELOAD_REQUESTED so the wrapper transitions through
@@ -640,10 +641,9 @@ static void test_stale_send_requeues_and_triggers_reload(void) {
     /* Arm the fake sink to return STALE on the next send. */
     sink_state.stale_returns_remaining = 1;
 
-    /* Upstream issues a tools/call. */
+    /* Upstream issues an idempotent tools/list — safe to replay. */
     struct mcp_msg req = parse_or_die(
-        "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\","
-        "\"params\":{\"name\":\"foo\"}}");
+        "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/list\"}");
     dispatch_on_upstream(d, &req);
 
     /* The send was rejected → dispatch must not have left in_flight
@@ -653,6 +653,8 @@ static void test_stale_send_requeues_and_triggers_reload(void) {
           "in_flight rolled back after STALE");
     CHECK(sink_state.child_len == 0,
           "no bytes recorded as forwarded (the STALE attempt failed)");
+    CHECK(sink_state.up_len == 0,
+          "no error response surfaced for replay-safe method");
     CHECK(sink_state.event_count == 1, "one event emitted");
     CHECK(sink_state.events[0] == FSM_EV_RELOAD_REQUESTED,
           "RELOAD_REQUESTED emitted on STALE");
@@ -667,8 +669,77 @@ static void test_stale_send_requeues_and_triggers_reload(void) {
     fsm_step(&f, FSM_EV_INITIALIZE_OK);    /* STARTING -> RUNNING */
     dispatch_on_state_change(d, f.state);
 
-    CHECK(strstr(sink_state.child_buf, "tools/call") != NULL,
-          "queued tools/call drained to child after recovery");
+    CHECK(strstr(sink_state.child_buf, "tools/list") != NULL,
+          "queued tools/list drained to child after recovery");
+
+    mcp_msg_free(&init_req);
+    mcp_msg_free(&init_resp);
+    mcp_msg_free(&req);
+    dispatch_free(d);
+}
+
+static void test_stale_send_surfaces_error_for_side_effecting(void) {
+    /* When send_child returns STALE for a side-effecting request
+     * (tools/call, sampling/createMessage — anything not on the
+     * replay-safe whitelist), dispatch must:
+     *   - undo the in-flight increment
+     *   - synthesise a structured -32002 error response to the agent
+     *   - NOT queue the bytes for replay (no silent re-issue)
+     *   - still emit RELOAD_REQUESTED so the next call lands cleanly
+     * This is the at-most-once-delivery contract for tool calls under
+     * upstream session loss. */
+    struct fsm f;
+    fsm_init(&f);
+    fsm_step(&f, FSM_EV_INITIALIZE_OK);
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    struct mcp_msg init_req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+    struct mcp_msg init_resp = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
+    dispatch_on_upstream(d, &init_req);
+    dispatch_on_child(d, &init_resp);
+
+    memset(&sink_state, 0, sizeof(sink_state));
+    sink_state.stale_returns_remaining = 1;
+
+    struct mcp_msg req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"launch_app\"}}");
+    dispatch_on_upstream(d, &req);
+
+    CHECK(dispatch_in_flight(d) == 0,
+          "in_flight rolled back after STALE");
+    sink_state.up_buf[sink_state.up_len < FAKE_BUF_CAP
+                          ? sink_state.up_len : FAKE_BUF_CAP - 1] = '\0';
+    CHECK(strstr(sink_state.up_buf, "\"id\":42") != NULL,
+          "error response carries the original request id");
+    CHECK(strstr(sink_state.up_buf, "\"error\"") != NULL,
+          "structured error surfaced to agent");
+    CHECK(strstr(sink_state.up_buf, "-32002") != NULL,
+          "session-reset error code present");
+    CHECK(sink_state.event_count == 1, "RELOAD_REQUESTED still emitted");
+    CHECK(sink_state.events[0] == FSM_EV_RELOAD_REQUESTED,
+          "cycle is still triggered for next-call recovery");
+
+    /* Run the cycle and confirm the side-effecting call is NOT
+     * replayed to the new child. */
+    sink_state.child_len = 0;
+    fsm_step(&f, FSM_EV_RELOAD_REQUESTED);
+    fsm_step(&f, FSM_EV_IN_FLIGHT_ZERO);
+    fsm_step(&f, FSM_EV_TRANSPORT_STARTED);
+    fsm_step(&f, FSM_EV_INITIALIZE_OK);
+    dispatch_on_state_change(d, f.state);
+    CHECK(strstr(sink_state.child_buf, "tools/call") == NULL,
+          "side-effecting call NOT silently replayed after cycle");
 
     mcp_msg_free(&init_req);
     mcp_msg_free(&init_resp);
@@ -710,6 +781,7 @@ int main(void) {
     test_replay_response_consumed_not_forwarded();
     test_replay_error_no_list_changed();
     test_stale_send_requeues_and_triggers_reload();
+    test_stale_send_surfaces_error_for_side_effecting();
     test_replay_noop_without_cache();
 
     if (fail_count > 0) {
