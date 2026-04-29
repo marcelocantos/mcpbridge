@@ -5,6 +5,27 @@ Maintenance actions taken on this repo by `/audit`, `/docs`,
 the top. See `~/.claude/skills/audit-log-convention.md` for the
 format.
 
+## 2026-04-28 — /release v0.7.0
+
+- **Commit**: `pending`
+- **Outcome**: HTTP-backend resilience refinements surfaced during
+  the spyder v0.26.0 release. Ships 🎯T8 (daemon watcher no longer
+  lstat()s HTTP-backend URLs as filesystem paths — wrapper reports
+  `NULL` `child_binary` for HTTP backends and the watcher skips
+  URL-shaped values defensively) and 🎯T9 (autonomous self-reload
+  gains a replay-safety contract: idempotent reads on a documented
+  whitelist replay transparently across upstream session rotation,
+  side-effecting calls like `tools/call` surface a structured
+  `-32002` JSON-RPC error rather than being silently re-issued).
+  Adds paired `upstream: cycling — session stale` / `upstream:
+  cycling — complete` log markers for tractable post-mortems.
+  STABILITY.md snapshot bumped to v0.7.0; settling clock unchanged
+  at 2026-04-25 (both changes additive). New e2e regression test
+  `e2e_http_session_invalid_call_test.sh` plus dispatch_test and
+  watcher_test cases. v0.6.0's transparent replay of every queued
+  request was correct for reads but violated at-most-once delivery
+  for writes; v0.7.0 splits the contract.
+
 ## 2026-04-27 — /release v0.6.0
 
 - **Commit**: `65d19d4`
