@@ -4,7 +4,7 @@ mcpbridge is a pre-1.0 project. This document tracks the public
 interaction surface and what still needs to settle before a 1.0
 release.
 
-Snapshot as of: **v0.6.0**.
+Snapshot as of: **v0.7.0**.
 
 ## Stability commitment
 
@@ -172,16 +172,27 @@ Stable contract from v0.6.0 onward; additive changes only.
 | Guarantee | Trigger | Behaviour |
 |---|---|---|
 | Daemon-driven reload | `mcpbridge-daemon` broadcasts `reload` (e.g. brew upgrade detected) | wrapper drains in-flight, re-handshakes upstream, replays cached `initialize` + `notifications/initialized`, emits `tools/list_changed` + `prompts/list_changed` + `resources/list_changed` upstream, sends `reload_ack`. Agent sees zero disconnect. **stable**. |
-| Autonomous self-reload | Upstream returns 4xx (typically `400 Bad Request: Invalid session ID`) for a request bearing the cached MCP-Session-Id | wrapper detects the stale session, queues the failed request, runs the daemon-less equivalent of the reload pathway (re-handshake + replay + list_changed broadcast), then drains the queued request under the new session. Added in v0.6.0. **stable**. |
+| Autonomous self-reload | Upstream returns 4xx (typically `400 Bad Request: Invalid session ID`) for a request bearing the cached MCP-Session-Id | wrapper detects the stale session, runs the daemon-less equivalent of the reload pathway (re-handshake + replay + list_changed broadcast). Idempotent reads on the replay-safe whitelist (`tools/list`, `prompts/list`, `prompts/get`, `resources/list`, `resources/read`, `resources/templates/list`, `resources/subscribe`, `resources/unsubscribe`, `roots/list`, `ping`, `logging/setLevel`, `completion/complete`, plus `initialize`/`notifications/initialized`) are queued and drained under the new session — agent sees zero error. Side-effecting requests (notably `tools/call` and `sampling/createMessage`) get a structured error per the next row rather than a silent retry. Added in v0.6.0; replay-safety split refined in v0.7.0. **stable**. |
+| Side-effecting call across stale session | Upstream returns 4xx for an in-flight `tools/call` (or any non-whitelisted method) | wrapper synthesises a JSON-RPC error response to the agent (preserving the original `id`) carrying code **`-32002`** with message `"mcpbridge: upstream session reset during call; please retry"`. The reload cycle still runs so subsequent calls land cleanly under the new session. Agents that receive `-32002` may safely retry the call. Added in v0.7.0. **stable**. |
 | Idle outage tolerance | Upstream becomes unreachable while no tool call is in flight | wrapper does no upstream I/O — there is no background pinger and no idle timeout. Outages of arbitrary length pass unobserved. The next tool call after the upstream returns succeeds via autonomous self-reload. Added in v0.6.0. **stable**. |
 | In-flight outage tolerance | Upstream becomes unreachable *while* a tool call is waiting | wrapper retries connect with bounded backoff (100ms → 500ms → 1s → 2s → 5s, capped) up to `tool_call_timeout_ms` (default 5 min). On success: T7's reinit fires and the call lands under the new session. On deadline expiry: see "Tool-call timeout error". Added in v0.6.0. **stable**. |
 | Tool-call timeout error | `tool_call_timeout_ms` elapses with the upstream still unreachable | wrapper synthesises a JSON-RPC error response to the agent (preserving the original `id`) and keeps the stdio session alive. Subsequent tool calls trigger fresh retries. Added in v0.6.0. **stable**. |
 
-JSON-RPC error code emitted by the wrapper for upstream-unreachable
-timeouts: **`-32001`** with message
-`"mcpbridge: upstream unreachable past timeout"` (or `"… during
-reinit"` if the timeout fired during recovery's replay). Added in
-v0.6.0. **stable**.
+JSON-RPC error codes emitted by the wrapper:
+- **`-32001`** — upstream unreachable past `tool_call_timeout_ms`,
+  with message `"mcpbridge: upstream unreachable past timeout"` (or
+  `"… during reinit"` if the timeout fired during recovery's
+  replay). Added in v0.6.0. **stable**.
+- **`-32002`** — upstream session reset during a side-effecting
+  call, with message `"mcpbridge: upstream session reset during
+  call; please retry"`. Added in v0.7.0. **stable**.
+
+Operator-visible cycle-window log markers (paired, autonomous
+cycles only):
+- `upstream: cycling — session stale; …` at the start of every
+  autonomous cycle.
+- `upstream: cycling — complete; agent session resumed` at the
+  return to RUNNING. Added in v0.7.0. **stable**.
 
 ### Resilience guarantees (daemon side)
 
@@ -359,6 +370,9 @@ hardening with no surface change. v0.6.0 adds
 prior behaviour for any practical workload) and a Resilience
 guarantees section documenting behaviour that pre-v0.6 left
 implicit — both additive, both extending the contract rather than
-narrowing it, neither resets the clock. Earliest 1.0 eligibility
-is therefore at least 2 months out from 2026-04-25, assuming no
-further breaking changes.
+narrowing it, neither resets the clock. v0.7.0 adds the
+replay-safety split for autonomous self-reload (idempotent reads
+replay; side-effecting calls surface `-32002` rather than silent
+retry) plus paired cycle-window log markers — also additive, also
+not a reset. Earliest 1.0 eligibility is therefore at least 2
+months out from 2026-04-25, assuming no further breaking changes.
