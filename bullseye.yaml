@@ -407,6 +407,44 @@ targets:
     origin: manual
     discovered: 2026-04-11
     achieved: 2026-04-11
+  T10:
+    name: Backend-unreachable JSON-RPC error envelopes carry a structured `data` field identifying the backend
+    status: identified
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    acceptance:
+    - 'The synthesised -32001 envelope for an unreachable URL backend includes a `data` field with `{backend: {name, url}}`'
+    - The data field never escapes through to a stdio backend's error path (URL backends only)
+    - 'Transparency invariant unchanged: the field rides on the existing -32001 envelope; no new MCP messages, no inspection of agent traffic, no new wire-protocol field between wrapper and daemon'
+    - An e2e test asserts the data field shape against a deliberately unreachable URL backend
+    context: 'When an HTTP backend is unreachable past the per-call deadline, the wrapper synthesises `{code: -32001, message: "mcpbridge: upstream unreachable past timeout"}` (🎯T7.1). The message is opaque — the agent cannot tell *which* backend timed out (mcpbridge may be proxying several), so it cannot do anything beyond retry. Adding a structured `data` field that names the backend (config name + URL) lets the agent or its environment surface an actionable failure without changing anything about the wrapped server''s protocol. This stays inside the transparency invariant: the field rides on an envelope mcpbridge already synthesises; no new MCP messages are minted, no agent traffic is inspected, no new wire-protocol field between wrapper and daemon. Forked from spyder triage (sessions fb7b365a-7 / eaca1054-2, 2026-05-09) where stale `mcpbridge connect` clients could not tell the user which backend was unreachable. The original target included supervisor (launchd/systemd) detection; that half was dropped 2026-05-10 as scope creep — figuring out whether a backend has a service-manager unit is the environment''s job, not mcpbridge''s. See 🎯T11 for the broader scope review that triggered the demotion.'
+    tags:
+    - resilience
+    - operator-experience
+    - http
+    origin: forked from spyder triage 2026-05-09 (sessions fb7b365a-7 / eaca1054-2)
+    discovered: 2026-05-09
+  T11:
+    name: The daemon's active install/poll subsystems are reviewed against the transparency invariant; non-essential pieces are set aside or retired
+    status: identified
+    value: 0.0
+    cost: 0.0
+    showcase: true
+    acceptance:
+    - 'Each currently-active install/poll subsystem is reviewed against the question: does mcpbridge need to do this, or does an external tool that ends with a binary on disk + the existing fsnotify watcher cover the same ground?'
+    - 'Subsystems in scope: daemon brew source backend, daemon GitHub release source backend, daemon polling scheduler that drives them'
+    - A keep / set-aside / retire decision is recorded for each subsystem, with rationale, in this target's context (or a linked doc / `~/.claude/projects/.../memory` entry)
+    - 'Dependents (config schema, docs, tests) are updated to match each decision: set-aside subsystems get a SetAside reason; retired subsystems are deleted with their dependents removed'
+    - The fsnotify-on-binary-path reload pathway (the keep-the-session-alive core) is preserved end-to-end through any retirements
+    context: 'mcpbridge''s core job is keeping the agent''s MCP session alive while the child swaps underneath — a wrapper-FSM property. The fsnotify watcher delivers swap signals from any external installer (brew upgrade, manual download, cron, future tooling). The currently-shipped *source* backends (`daemon/internal/source/brew.go`, GitHub releases under the same package) and the polling scheduler that drives them go further: mcpbridge actively polls upstream registries, downloads release artifacts, verifies SHA256 sums, and atomically replaces the wrapped binary. That pulls mcpbridge across the line from "transparent proxy" into "I install your software," and inherits a trust model (HTTPS verification, signature checks, rollback policy) that is not core to the proxy contract. The user already runs the install via brew or their own tooling; the daemon''s polling+install duplicates it. Surfaced 2026-05-10 while scoping 🎯T10, which was demoted from supervisor detection for the same reason. Decision pending per backend (keep / set-aside / retire); brew + GitHub are shipped, tested, documented, so set-aside is cheaper than rip-out, and the fsnotify-on-binary-path mechanism keeps "20 running Claude sessions auto-pick-up upgrades" working regardless of which path the user installs through. The decision recorded here also serves as the line for future "let''s add X to mcpbridge" proposals shaped like T10''s first draft.'
+    tags:
+    - scope
+    - architecture
+    - daemon
+    - review
+    origin: discovered while scoping T10 (2026-05-10)
+    discovered: 2026-05-10
   T2:
     name: The daemon's brew source backend resolves the brew executable reliably under launchd, where $PATH does not include /opt/homebrew/bin.
     status: achieved
