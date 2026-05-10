@@ -339,7 +339,10 @@ sleep 3
 exec 6>&-
 wait "$WRAPPER_PID_C" 2>/dev/null || true
 
-# Both ids must come back as errors.
+# Both ids must come back as errors, with structured backend data (🎯T10).
+EXPECTED_NAME="fake-http-mcp"
+EXPECTED_URL="http://127.0.0.1:${PORT_C}/mcp"
+
 for id in 3 4; do
     line=$(grep "\"id\":${id}" "$WRAPPER_OUT_C" || true)
     if [ -z "$line" ]; then
@@ -364,6 +367,24 @@ for id in 3 4; do
             exit 1
             ;;
     esac
+    # Verify structured backend data in error.data (🎯T10).
+    err_code=$(printf '%s' "$line" | jq -r '.error.code')
+    if [ "$err_code" != "-32001" ]; then
+        echo "http dead upstream e2e (C): id=${id} expected error.code=-32001, got $err_code" >&2
+        exit 1
+    fi
+    got_name=$(printf '%s' "$line" | jq -r '.error.data.backend.name // empty')
+    if [ "$got_name" != "$EXPECTED_NAME" ]; then
+        echo "http dead upstream e2e (C): id=${id} error.data.backend.name: expected '$EXPECTED_NAME', got '$got_name'" >&2
+        echo "--- envelope ---" >&2; printf '%s\n' "$line" >&2
+        exit 1
+    fi
+    got_url=$(printf '%s' "$line" | jq -r '.error.data.backend.url // empty')
+    if [ "$got_url" != "$EXPECTED_URL" ]; then
+        echo "http dead upstream e2e (C): id=${id} error.data.backend.url: expected '$EXPECTED_URL', got '$got_url'" >&2
+        echo "--- envelope ---" >&2; printf '%s\n' "$line" >&2
+        exit 1
+    fi
 done
 
 # The wrapper must have logged the timeout signal explicitly.

@@ -441,19 +441,25 @@ char *mcp_build_list_changed(const char *kind, size_t *out_len) {
 char *mcp_build_error_response(const struct mcp_id *id,
                                int code,
                                const char *message,
+                               cJSON *data,
                                size_t *out_len) {
     if (id == NULL || message == NULL) {
+        cJSON_Delete(data);
         return NULL;
     }
     if (id->tag == MCP_ID_NONE) {
         /* Notifications have no id; there is no valid error response
          * to send back. The caller is expected to drop the message
          * and log instead. */
+        cJSON_Delete(data);
         return NULL;
     }
 
     cJSON *root = cJSON_CreateObject();
-    if (root == NULL) return NULL;
+    if (root == NULL) {
+        cJSON_Delete(data);
+        return NULL;
+    }
     cJSON_AddStringToObject(root, "jsonrpc", "2.0");
     if (id->tag == MCP_ID_INT) {
         cJSON_AddNumberToObject(root, "id", (double)id->v.i);
@@ -463,6 +469,9 @@ char *mcp_build_error_response(const struct mcp_id *id,
     cJSON *err = cJSON_CreateObject();
     cJSON_AddNumberToObject(err, "code", (double)code);
     cJSON_AddStringToObject(err, "message", message);
+    if (data != NULL) {
+        cJSON_AddItemToObject(err, "data", data);
+    }
     cJSON_AddItemToObject(root, "error", err);
 
     char *json = cJSON_PrintUnformatted(root);

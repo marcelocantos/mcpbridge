@@ -122,4 +122,13 @@ int dispatch_initialized(const struct dispatch *d);
 /* Whether an initialize request has been captured for replay. */
 int dispatch_has_cached_init(const struct dispatch *d);
 
+/* Store the backend identity for inclusion in synthesised -32001 error
+ * envelopes (🎯T10). Both pointers are borrowed — they must remain
+ * valid for the lifetime of the dispatch object (typically the cfg
+ * struct, which outlives dispatch). Only called for HTTP backends;
+ * stdio backends leave the identity as NULL (no data field emitted). */
+void dispatch_set_backend_id(struct dispatch *d,
+                             const char *name,
+                             const char *url);
+
 #endif /* MCPBRIDGE_DISPATCH_H */
