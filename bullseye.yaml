@@ -409,10 +409,11 @@ targets:
     achieved: 2026-04-11
   T10:
     name: Backend-unreachable JSON-RPC error envelopes carry a structured `data` field identifying the backend
-    status: identified
+    status: achieved
     value: 0.0
     cost: 0.0
     showcase: true
+    demonstration: 'Built the wrapper with the new data-field path (commit 236e5bb on master) and ran `make -C wrapper test` end-to-end. All gates green: dispatch unit tests, mcp_test (including three new tests covering NULL data, populated data with deep JSON assertion on `error.data.backend.{name,url}`, and the MCP_ID_NONE early-return path that frees the borrowed data object), and the full e2e shell suite. The decisive demonstration is `tests/e2e_http_dead_upstream_test.sh` subtest C ("in-flight timeout produces JSON-RPC error, wrapper alive"): a wrapper running against a dead URL backend (`http://127.0.0.1:<port>/mcp`, config name `http-dead-upstream`) hits the per-call deadline, synthesises the -32001 envelope, and the test now uses `jq` to assert `.error.code == -32001`, `.error.data.backend.name == "http-dead-upstream"`, and `.error.data.backend.url == "http://127.0.0.1:<port>/mcp"` on the captured response — all three pass. The wrapper stays alive across the synthesised error and a follow-up call also gets a populated envelope. Implementation: `mcp_build_error_response` extended with an optional `cJSON *data` parameter that the function consumes (added to the envelope on success, freed on every early-return path so the caller''s hand-off is unconditional); `dispatch_set_backend_id(d, name, url)` setter wired in `main.c`''s `CONFIG_BACKEND_HTTP` branch only (stdio leaves both NULL); a static `build_backend_data(d)` helper in `dispatch.c` constructs the `{backend: {name, url}}` object at the two -32001 sites (`dispatch_on_upstream` timeout path at line ~256 and `drain_queue_with_error` recovery-abort path) and returns NULL when both fields are empty so stdio backends never see the field. The -32002 session-reset envelope is unchanged. No daemon code touched, no wire-protocol field added between wrapper and daemon.'
     acceptance:
     - 'The synthesised -32001 envelope for an unreachable URL backend includes a `data` field with `{backend: {name, url}}`'
     - The data field never escapes through to a stdio backend's error path (URL backends only)
@@ -425,6 +426,7 @@ targets:
     - http
     origin: forked from spyder triage 2026-05-09 (sessions fb7b365a-7 / eaca1054-2)
     discovered: 2026-05-09
+    achieved: 2026-05-10
   T11:
     name: The daemon's active install/poll subsystems are reviewed against the transparency invariant; non-essential pieces are set aside or retired
     status: identified
