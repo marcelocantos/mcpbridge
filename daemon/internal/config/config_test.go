@@ -8,42 +8,40 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
-const stdioBrew = `{
+const stdioNoSource = `{
 	"schema": 2,
 	"name": "mnemo",
-	"command": "/opt/homebrew/bin/mnemo",
-	"source": {"type": "brew", "formula": "marcelocantos/tap/mnemo"},
-	"upgrade": "notify",
-	"check_interval": "30m"
+	"command": "/opt/homebrew/bin/mnemo"
 }`
 
-const stdioBrewWithArgs = `{
+const stdioWithArgs = `{
 	"schema": 2,
 	"name": "mcp-foo",
 	"command": "/usr/local/bin/mcp-foo",
-	"args": ["--config", "/etc/foo.conf", "--quiet"],
-	"source": {"type": "brew", "formula": "owner/tap/mcp-foo"}
+	"args": ["--config", "/etc/foo.conf", "--quiet"]
 }`
 
-const httpGitHub = `{
+const httpBackend = `{
 	"schema": 2,
 	"name": "vellum",
-	"url": "http://localhost:9000/mcp",
-	"source": {
-		"type": "github",
-		"repo": "owner/vellum",
-		"asset": "vellum-{version}-{os}-{arch}.tar.gz",
-		"binary_in_archive": "vellum",
-		"checksum_asset": "SHA256SUMS"
-	},
-	"upgrade": "auto"
+	"url": "http://localhost:9000/mcp"
+}`
+
+// vestigialFields is a config with the old source/upgrade/check_interval
+// fields that must still load successfully (forward compat).
+const vestigialFields = `{
+	"schema": 2,
+	"name": "legacy",
+	"command": "/opt/homebrew/bin/legacy",
+	"source": {"type": "github", "repo": "foo/bar"},
+	"upgrade": "auto",
+	"check_interval": "1h"
 }`
 
 func TestParseStdio(t *testing.T) {
-	cfg, err := ParseBytes("test.json", []byte(stdioBrew))
+	cfg, err := ParseBytes("test.json", []byte(stdioNoSource))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -59,16 +57,10 @@ func TestParseStdio(t *testing.T) {
 	if cfg.URL != "" {
 		t.Errorf("url should be empty for stdio config, got %q", cfg.URL)
 	}
-	if cfg.Source.Formula != "marcelocantos/tap/mnemo" {
-		t.Errorf("formula: got %q", cfg.Source.Formula)
-	}
-	if cfg.CheckInterval != 30*time.Minute {
-		t.Errorf("check_interval: got %v", cfg.CheckInterval)
-	}
 }
 
 func TestParseStdioWithArgs(t *testing.T) {
-	cfg, err := ParseBytes("test.json", []byte(stdioBrewWithArgs))
+	cfg, err := ParseBytes("test.json", []byte(stdioWithArgs))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -84,7 +76,7 @@ func TestParseStdioWithArgs(t *testing.T) {
 }
 
 func TestParseHTTP(t *testing.T) {
-	cfg, err := ParseBytes("test.json", []byte(httpGitHub))
+	cfg, err := ParseBytes("test.json", []byte(httpBackend))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -97,15 +89,6 @@ func TestParseHTTP(t *testing.T) {
 	if cfg.Command != "" {
 		t.Errorf("command should be empty for http config, got %q", cfg.Command)
 	}
-	if cfg.Source.Type != SourceGitHub {
-		t.Errorf("source type: got %q", cfg.Source.Type)
-	}
-	if cfg.Upgrade != UpgradeAuto {
-		t.Errorf("upgrade: got %q", cfg.Upgrade)
-	}
-	if cfg.CheckInterval != DefaultCheckInterval {
-		t.Errorf("default check_interval not applied: got %v", cfg.CheckInterval)
-	}
 }
 
 func TestParseTildeExpansion(t *testing.T) {
@@ -115,8 +98,7 @@ func TestParseTildeExpansion(t *testing.T) {
 	}
 	body := `{
 		"schema": 2, "name": "x",
-		"command": "~/bin/x",
-		"source": {"type": "brew", "formula": "x"}
+		"command": "~/bin/x"
 	}`
 	cfg, err := ParseBytes("test.json", []byte(body))
 	if err != nil {
@@ -132,22 +114,18 @@ func TestParseRejectsConnectionShape(t *testing.T) {
 	cases := map[string]string{
 		"both command and url": `{
 			"schema": 2, "name": "x",
-			"command": "/bin/x", "url": "http://localhost/x",
-			"source": {"type": "brew", "formula": "x"}
+			"command": "/bin/x", "url": "http://localhost/x"
 		}`,
 		"neither command nor url": `{
-			"schema": 2, "name": "x",
-			"source": {"type": "brew", "formula": "x"}
+			"schema": 2, "name": "x"
 		}`,
 		"https url": `{
 			"schema": 2, "name": "x",
-			"url": "https://localhost/x",
-			"source": {"type": "brew", "formula": "x"}
+			"url": "https://localhost/x"
 		}`,
 		"non-loopback url": `{
 			"schema": 2, "name": "x",
-			"url": "http://example.com/x",
-			"source": {"type": "brew", "formula": "x"}
+			"url": "http://example.com/x"
 		}`,
 	}
 	for label, body := range cases {
@@ -162,8 +140,7 @@ func TestParseRejectsConnectionShape(t *testing.T) {
 
 func TestParseRejectsSchemaV1WithMigration(t *testing.T) {
 	data := []byte(`{
-		"schema": 1, "name": "x",
-		"source": {"type": "brew", "formula": "x"}
+		"schema": 1, "name": "x"
 	}`)
 	_, err := ParseBytes("test.json", data)
 	if err == nil {
@@ -180,24 +157,11 @@ func TestParseRejectsSchemaV1WithMigration(t *testing.T) {
 func TestParseRejectsBadSchema(t *testing.T) {
 	data := []byte(`{
 		"schema": 99, "name": "x",
-		"command": "/bin/x",
-		"source": {"type": "brew", "formula": "x"}
+		"command": "/bin/x"
 	}`)
 	_, err := ParseBytes("test.json", data)
 	if err == nil {
 		t.Fatal("expected error on unknown schema version")
-	}
-}
-
-func TestParseRejectsUnknownSource(t *testing.T) {
-	data := []byte(`{
-		"schema": 2, "name": "x",
-		"command": "/bin/x",
-		"source": {"type": "yolo"}
-	}`)
-	_, err := ParseBytes("test.json", data)
-	if err == nil {
-		t.Fatal("expected error on unknown source type")
 	}
 }
 
@@ -211,24 +175,10 @@ func TestParseRejectsMalformedJSON(t *testing.T) {
 func TestParseRejectsMissingFields(t *testing.T) {
 	cases := map[string]string{
 		"missing schema": `{
-			"name": "x", "command": "/bin/x",
-			"source": {"type": "brew", "formula": "f"}
+			"name": "x", "command": "/bin/x"
 		}`,
 		"missing name": `{
-			"schema": 2, "command": "/bin/x",
-			"source": {"type": "brew", "formula": "f"}
-		}`,
-		"brew no formula": `{
-			"schema": 2, "name": "x", "command": "/bin/x",
-			"source": {"type": "brew"}
-		}`,
-		"github no repo": `{
-			"schema": 2, "name": "x", "command": "/bin/x",
-			"source": {"type": "github"}
-		}`,
-		"empty source": `{
-			"schema": 2, "name": "x", "command": "/bin/x",
-			"source": {}
+			"schema": 2, "command": "/bin/x"
 		}`,
 	}
 	for label, body := range cases {
@@ -241,37 +191,19 @@ func TestParseRejectsMissingFields(t *testing.T) {
 	}
 }
 
-func TestParseRejectsBadUpgradeMode(t *testing.T) {
-	data := []byte(`{
-		"schema": 2, "name": "x", "command": "/bin/x",
-		"source": {"type": "brew", "formula": "f"},
-		"upgrade": "maybe"
-	}`)
-	_, err := ParseBytes("test.json", data)
-	if err == nil {
-		t.Fatal("expected error on bad upgrade mode")
+// TestVestigialFieldsLoadSilently verifies that configs with the old
+// source/upgrade/check_interval fields still load successfully.
+// These fields were removed in T11; existing configs must not break.
+func TestVestigialFieldsLoadSilently(t *testing.T) {
+	cfg, err := ParseBytes("test.json", []byte(vestigialFields))
+	if err != nil {
+		t.Fatalf("old config with source/upgrade/check_interval should load: %v", err)
 	}
-}
-
-func TestParseRejectsBadInterval(t *testing.T) {
-	data := []byte(`{
-		"schema": 2, "name": "x", "command": "/bin/x",
-		"source": {"type": "brew", "formula": "f"},
-		"check_interval": "banana"
-	}`)
-	_, err := ParseBytes("test.json", data)
-	if err == nil {
-		t.Fatal("expected error on bad duration")
+	if cfg.Name != "legacy" {
+		t.Errorf("name: got %q, want %q", cfg.Name, "legacy")
 	}
-
-	data = []byte(`{
-		"schema": 2, "name": "x", "command": "/bin/x",
-		"source": {"type": "brew", "formula": "f"},
-		"check_interval": "-5m"
-	}`)
-	_, err = ParseBytes("test.json", data)
-	if err == nil {
-		t.Fatal("expected error on negative duration")
+	if cfg.Backend() != BackendStdio {
+		t.Errorf("backend: got %v", cfg.Backend())
 	}
 }
 
@@ -318,20 +250,17 @@ func TestLoadDiscoversMultipleDirs(t *testing.T) {
 	dirB := t.TempDir()
 
 	if err := os.WriteFile(filepath.Join(dirA, "mnemo.json"), []byte(`{
-		"schema": 2, "name": "mnemo", "command": "/bin/mnemo",
-		"source": {"type": "brew", "formula": "marcelocantos/tap/mnemo"}
+		"schema": 2, "name": "mnemo", "command": "/bin/mnemo"
 	}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dirB, "foo.json"), []byte(`{
-		"schema": 2, "name": "foo", "command": "/bin/foo",
-		"source": {"type": "brew", "formula": "owner/tap/foo"}
+		"schema": 2, "name": "foo", "command": "/bin/foo"
 	}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dirB, "mnemo.json"), []byte(`{
-		"schema": 2, "name": "mnemo", "command": "/bin/mnemo-other",
-		"source": {"type": "brew", "formula": "other/tap/mnemo"}
+		"schema": 2, "name": "mnemo", "command": "/bin/mnemo-other"
 	}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -347,8 +276,8 @@ func TestLoadDiscoversMultipleDirs(t *testing.T) {
 	if !ok {
 		t.Fatal("mnemo missing")
 	}
-	if mnemo.Source.Formula != "marcelocantos/tap/mnemo" {
-		t.Errorf("earlier-dir-wins violated: got %q", mnemo.Source.Formula)
+	if mnemo.Command != "/bin/mnemo" {
+		t.Errorf("earlier-dir-wins violated: got %q", mnemo.Command)
 	}
 	if _, ok := res.Configs["foo"]; !ok {
 		t.Error("foo missing from second dir")
@@ -358,8 +287,7 @@ func TestLoadDiscoversMultipleDirs(t *testing.T) {
 func TestLoadCollectsPerFileErrors(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "ok.json"), []byte(`{
-		"schema": 2, "name": "ok", "command": "/bin/ok",
-		"source": {"type": "brew", "formula": "x"}
+		"schema": 2, "name": "ok", "command": "/bin/ok"
 	}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -383,8 +311,7 @@ func TestLoadCollectsPerFileErrors(t *testing.T) {
 func TestLoadSkipsMissingDirs(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "ok.json"), []byte(`{
-		"schema": 2, "name": "ok", "command": "/bin/ok",
-		"source": {"type": "brew", "formula": "x"}
+		"schema": 2, "name": "ok", "command": "/bin/ok"
 	}`), 0o644); err != nil {
 		t.Fatal(err)
 	}

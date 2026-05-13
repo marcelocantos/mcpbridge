@@ -3,8 +3,7 @@
 
 // Package config loads per-server JSON config files. Each file
 // describes one wrapped MCP server: how to reach it (stdio child or
-// HTTP upstream), how to check for a new version, and whether
-// auto-upgrade is opt-in.
+// HTTP upstream).
 //
 // Two consumers read these files:
 //
@@ -13,8 +12,8 @@
 //     connection fields (command/args or url) and the name (used
 //     to register with the daemon).
 //   - The daemon, which scans well-known directories, reads every
-//     *.json file, and uses the source/upgrade fields for upgrade
-//     polling. It ignores the connection fields.
+//     *.json file, and uses the name to route reload broadcasts to
+//     the right wrapper.
 //
 // Schema is shared between both consumers and documented in
 // docs/config-schema.md (authoritative reference).
@@ -30,7 +29,6 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // SchemaVersion is the config schema version this build understands.
@@ -38,39 +36,6 @@ import (
 // the wrapper can find its backend without argv flags. v1 is no
 // longer accepted; pre-1.0 release notes describe the migration.
 const SchemaVersion = 2
-
-// UpgradeMode controls what the daemon does when a new version is
-// detected.
-type UpgradeMode string
-
-const (
-	UpgradeOff    UpgradeMode = "off"
-	UpgradeNotify UpgradeMode = "notify"
-	UpgradeAuto   UpgradeMode = "auto"
-)
-
-// SourceType identifies the upgrade source backend.
-type SourceType string
-
-const (
-	SourceBrew   SourceType = "brew"
-	SourceGitHub SourceType = "github"
-)
-
-// Source is the discriminated union of per-type source metadata.
-// Only one of Brew or GitHub is populated, matching Type.
-type Source struct {
-	Type SourceType `json:"type"`
-
-	// brew
-	Formula string `json:"formula,omitempty"`
-
-	// github
-	Repo            string `json:"repo,omitempty"`
-	Asset           string `json:"asset,omitempty"`
-	BinaryInArchive string `json:"binary_in_archive,omitempty"`
-	ChecksumAsset   string `json:"checksum_asset,omitempty"`
-}
 
 // BackendKind names the connection style declared by a Config.
 type BackendKind int
@@ -98,11 +63,7 @@ type Config struct {
 	Args    []string `json:"args,omitempty"`
 	URL     string   `json:"url,omitempty"`
 
-	Source        Source        `json:"source"`
-	Upgrade       UpgradeMode   `json:"upgrade,omitempty"`
-	CheckInterval time.Duration `json:"-"`
-	RawInterval   string        `json:"check_interval,omitempty"`
-	Path          string        `json:"-"` // absolute path of the source file
+	Path string `json:"-"` // absolute path of the source file
 }
 
 // Backend reports which connection style this config declares.
@@ -119,9 +80,6 @@ func (c *Config) Backend() BackendKind {
 	}
 }
 
-// DefaultCheckInterval is used when a config omits check_interval.
-const DefaultCheckInterval = time.Hour
-
 // migrationHintV1 is what we tell users who have a schema:1 file on
 // disk. Pre-1.0, no auto-migration; the user edits the file once and
 // moves on.
@@ -129,8 +87,7 @@ const migrationHintV1 = `Schema v1 is no longer supported. Migrate by:
 - Setting "schema": 2
 - Adding "command": "/path/to/binary" and optional "args": [...] for stdio servers,
   or "url": "http://localhost:PORT/path" for HTTP servers.
-The file's existing "name" / "source" / "upgrade" / "check_interval"
-fields are unchanged. See docs/config-schema.md.`
+The file's existing "name" field is unchanged. See docs/config-schema.md.`
 
 // ParseBytes parses one file's bytes into a validated Config. The
 // `path` parameter is used for error messages and stored on the
@@ -161,34 +118,6 @@ func ParseBytes(path string, data []byte) (*Config, error) {
 
 	if err := validateConnection(path, &c); err != nil {
 		return nil, err
-	}
-
-	switch c.Upgrade {
-	case "":
-		c.Upgrade = UpgradeNotify
-	case UpgradeOff, UpgradeNotify, UpgradeAuto:
-		// valid
-	default:
-		return nil, fmt.Errorf("%s: unknown upgrade mode %q", path, c.Upgrade)
-	}
-
-	if err := validateSource(path, &c.Source); err != nil {
-		return nil, err
-	}
-
-	if c.RawInterval == "" {
-		c.CheckInterval = DefaultCheckInterval
-	} else {
-		d, err := time.ParseDuration(c.RawInterval)
-		if err != nil {
-			return nil, fmt.Errorf("%s: bad check_interval %q: %w",
-				path, c.RawInterval, err)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("%s: check_interval must be positive, got %q",
-				path, c.RawInterval)
-		}
-		c.CheckInterval = d
 	}
 
 	return &c, nil
@@ -240,24 +169,6 @@ func isLoopback(host string) bool {
 		return true
 	}
 	return false
-}
-
-func validateSource(path string, s *Source) error {
-	switch s.Type {
-	case SourceBrew:
-		if s.Formula == "" {
-			return fmt.Errorf("%s: brew source requires \"formula\"", path)
-		}
-	case SourceGitHub:
-		if s.Repo == "" {
-			return fmt.Errorf("%s: github source requires \"repo\"", path)
-		}
-	case "":
-		return fmt.Errorf("%s: missing required field \"source.type\"", path)
-	default:
-		return fmt.Errorf("%s: unknown source type %q", path, s.Type)
-	}
-	return nil
 }
 
 // ParseFile reads and parses one config file.

@@ -1,17 +1,15 @@
 // Copyright 2026 Marcelo Cantos
 // SPDX-License-Identifier: Apache-2.0
 
-// mcpbridge-daemon is the long-lived upgrade poller for the mcpbridge
+// mcpbridge-daemon is the long-lived coordinator for the mcpbridge
 // wrapper. Exactly one instance runs per user session (typically under
-// `brew services`), polls configured MCP server sources for new
-// versions, performs the upgrades, and notifies connected wrappers to
-// cycle their children.
-//
-// This build lands the UDS server and the hello/register/reload
-// handshake. Source backends (brew, github) and the polling scheduler
-// come in later targets. SIGHUP broadcasts a manual reload to every
-// currently registered wrapper — useful both as a "check now" knob
-// and as the easiest way to test the reload path end to end.
+// `brew services`). It watches each registered wrapper's child binary
+// via fsnotify and broadcasts a targeted reload when the binary changes
+// on disk. Upgrades are owned by whatever tool puts the binary in place
+// (brew upgrade, manual install, etc.) — the daemon does not poll or
+// install. SIGHUP broadcasts a manual reload to every currently
+// registered wrapper — useful in development to trigger the reload path
+// without a real binary change.
 package main
 
 import (
@@ -27,9 +25,7 @@ import (
 	"syscall"
 
 	"github.com/marcelocantos/mcpbridge/daemon/internal/config"
-	"github.com/marcelocantos/mcpbridge/daemon/internal/scheduler"
 	"github.com/marcelocantos/mcpbridge/daemon/internal/socket"
-	"github.com/marcelocantos/mcpbridge/daemon/internal/source"
 	"github.com/marcelocantos/mcpbridge/daemon/internal/watcher"
 )
 
@@ -66,9 +62,11 @@ func resolveConfigDirs() []string {
 
 const usageText = `Usage: mcpbridge-daemon [OPTIONS]
 
-The mcpbridge upgrade daemon. Runs one per user session (typically
-under brew services) and notifies connected wrappers when a new
-version of a wrapped MCP server is available.
+The mcpbridge daemon. Runs one per user session (typically under brew
+services). Watches each registered wrapper's child binary via fsnotify
+and broadcasts a targeted reload when the binary changes on disk.
+Upgrades happen via the user's normal install path (brew upgrade,
+manual install, etc.) — the daemon does not poll or install.
 
 Options:
   --socket PATH    override the UDS path (default: platform-specific)
@@ -158,15 +156,13 @@ func main() {
 		"dirs", configDirs)
 
 	lookup := func(name string) (bool, bool) {
-		cfg, ok := cfgLoad.Configs[name]
+		_, ok := cfgLoad.Configs[name]
 		if !ok {
 			return false, false
 		}
-		// Polling is enabled when the config exists AND its upgrade
-		// mode isn't "off". The source backends (T1.12) will
-		// actually consult this to decide whether to schedule a
-		// poll; for now it's just reported back to the wrapper.
-		return true, cfg.Upgrade != config.UpgradeOff
+		// polling is a vestigial wire-protocol field kept for
+		// backwards compatibility; the daemon no longer polls.
+		return true, false
 	}
 
 	srv, err := socket.NewServer(sockPath, lookup)
@@ -191,17 +187,6 @@ func main() {
 	srv.SetRegistrationHandler(wch)
 	go wch.Run(ctx)
 	defer wch.Close()
-
-	// Scheduler: one goroutine per config, polls on interval, uses
-	// the brew and github source backends, and broadcasts targeted
-	// reloads through the socket server.
-	sched := scheduler.New(
-		cfgLoad.Configs,
-		source.NewBrew(),
-		source.NewGitHub(),
-		srv,
-	)
-	go sched.Run(ctx)
 
 	// Signal routing. SIGHUP triggers a manual reload broadcast;
 	// SIGINT/SIGTERM cancels the context which unblocks Run.
