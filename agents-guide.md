@@ -99,7 +99,8 @@ socket file exists and is mode 0600.
 ### 3. Drop at least one per-server config
 
 The config file is the single source of truth for both the wrapper
-(connection details) and the daemon (upgrade source). Create
+(connection details) and the daemon (name-based reload routing).
+Create
 `~/.config/mcpbridge/` and drop one schema-v2 JSON file per MCP
 server.
 

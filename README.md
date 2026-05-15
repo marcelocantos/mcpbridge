@@ -129,9 +129,13 @@ client restart needed.
   is waiting, the wrapper retries the upstream connect with
   bounded backoff (100ms → 5s, capped) for up to the configured
   per-call timeout. If the timeout elapses before the upstream
-  returns, mcpbridge synthesises a structured JSON-RPC error for
-  that one call and keeps the agent's session alive — subsequent
-  tool calls just try again.
+  returns, mcpbridge synthesises a structured JSON-RPC error
+  (`code: -32001`, `message: "mcpbridge: upstream unreachable past
+  timeout"`) for that one call and keeps the agent's session
+  alive — subsequent tool calls just try again. For URL backends
+  the error envelope carries a `data.backend.{name,url}` field
+  identifying which backend timed out, so the agent can act on
+  the failure beyond retrying.
 
 The per-call timeout is configurable in the schema-v2 config file:
 
