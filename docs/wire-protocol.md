@@ -126,8 +126,9 @@ with an `error` message and then close.
 ### `register` (wrapper → daemon)
 
 The wrapper announces which MCP server it is wrapping. The daemon uses
-this to enable upgrade polling for that server (if a config exists)
-and to track which wrappers should receive `reload` notifications.
+this to watch the child binary for changes (fsnotify) and to track
+which wrappers should receive `reload` notifications when the binary
+changes on disk.
 
 ```json
 {
@@ -199,13 +200,14 @@ child, replay `initialize`, diff the tool list, and resume.
   "name": "mnemo",
   "old_version": "0.4.2",
   "new_version": "0.5.0",
-  "reason": "brew_upgrade"
+  "reason": "binary_changed"
 }
 ```
 
 `reason` is advisory; the wrapper logs it but does not branch on it.
-Known values: `brew_upgrade`, `github_release`, `binary_changed`
-(fsnotify-detected), `manual` (SIGHUP to daemon).
+Known values: `binary_changed` (fsnotify-detected) and `manual`
+(SIGHUP to daemon). Older daemons may emit `brew_upgrade` or
+`github_release`; wrappers ignore the value.
 
 ### `reload_ack` (wrapper → daemon)
 
@@ -277,8 +279,8 @@ treats a new connection from a known `name` as a fresh registration
 If the daemon dies mid-session, the wrapper's socket `read` returns
 EOF. The wrapper logs, closes its end, and re-enters the retry loop.
 Any `reload` notification that was in flight and not yet acked is
-lost — the next poll cycle on the daemon side will re-detect the
-condition and send a new `reload` after reconnect.
+lost — the next fsnotify event on the daemon side will re-detect
+the binary change and send a new `reload` after reconnect.
 
 ## Versioning
 
