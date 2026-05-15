@@ -8,6 +8,8 @@
 #include "mcp.h"
 #include "util.h"
 
+#include "cJSON.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -38,6 +40,12 @@ struct dispatch {
 
     struct queued_msg *queue_head;
     struct queued_msg *queue_tail;
+
+    /* Backend identity for -32001 error envelopes (🎯T10). Borrowed
+     * pointers; lifetime tied to the cfg object (outlives dispatch).
+     * NULL for stdio backends — no data field is emitted in that case. */
+    const char *backend_name;
+    const char *backend_url;
 };
 
 /* Returns DISPATCH_SEND_OK / _STALE / _FATAL when to_child is set;
@@ -140,6 +148,48 @@ int dispatch_initialized(const struct dispatch *d) {
 
 int dispatch_has_cached_init(const struct dispatch *d) {
     return (d == NULL) ? 0 : (d->cached_init_req != NULL);
+}
+
+void dispatch_set_backend_id(struct dispatch *d,
+                             const char *name,
+                             const char *url) {
+    if (d == NULL) {
+        return;
+    }
+    d->backend_name = name;
+    d->backend_url  = url;
+}
+
+/* Build the error.data object for a -32001 envelope (🎯T10).
+ * Returns NULL if the dispatch has no backend identity (stdio), or if
+ * both name and url are NULL/empty (defensive). Caller passes the
+ * returned pointer to mcp_build_error_response, which takes ownership. */
+static cJSON *build_backend_data(const struct dispatch *d) {
+    if (d->backend_name == NULL && d->backend_url == NULL) {
+        return NULL;
+    }
+    cJSON *backend = cJSON_CreateObject();
+    if (backend == NULL) {
+        return NULL;
+    }
+    if (d->backend_name != NULL && d->backend_name[0] != '\0') {
+        cJSON_AddStringToObject(backend, "name", d->backend_name);
+    }
+    if (d->backend_url != NULL && d->backend_url[0] != '\0') {
+        cJSON_AddStringToObject(backend, "url", d->backend_url);
+    }
+    /* If both fields ended up empty/NULL, free the partial object. */
+    if (cJSON_GetArraySize(backend) == 0) {
+        cJSON_Delete(backend);
+        return NULL;
+    }
+    cJSON *data = cJSON_CreateObject();
+    if (data == NULL) {
+        cJSON_Delete(backend);
+        return NULL;
+    }
+    cJSON_AddItemToObject(data, "backend", backend);
+    return data;
 }
 
 /* Store a copy of the given bytes in *dst / *dst_len, replacing any
@@ -256,6 +306,7 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
                 char *err = mcp_build_error_response(
                     &m->id, -32001,
                     "mcpbridge: upstream unreachable past timeout",
+                    build_backend_data(d),
                     &elen);
                 if (err != NULL) {
                     d->sink.send_upstream(d->sink.ctx, err, elen);
@@ -306,6 +357,7 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
                     &m->id, -32002,
                     "mcpbridge: upstream session reset during call; "
                     "please retry",
+                    NULL,
                     &elen);
                 if (err != NULL) {
                     d->sink.send_upstream(d->sink.ctx, err, elen);
@@ -475,9 +527,12 @@ static void drain_queue_with_error(struct dispatch *d,
         struct mcp_msg m = {0};
         if (mcp_msg_parse(q->bytes, q->len, &m) == MCP_PARSE_OK
          && m.kind == MCP_KIND_REQUEST) {
+            /* For -32001 envelopes, include backend identity so the
+             * agent knows which backend failed (🎯T10). */
+            cJSON *data = (code == -32001) ? build_backend_data(d) : NULL;
             size_t elen = 0;
             char *err = mcp_build_error_response(&m.id, code, message,
-                                                 &elen);
+                                                 data, &elen);
             if (err != NULL) {
                 d->sink.send_upstream(d->sink.ctx, err, elen);
                 free(err);

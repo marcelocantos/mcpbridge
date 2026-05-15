@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 targets:
   T1:
     name: A generic C wrapper transparently proxies any stdio MCP server with automatic upgrade detection and execution, keeping the agent's MCP session alive across child restarts.
@@ -407,6 +407,44 @@ targets:
     origin: manual
     discovered: 2026-04-11
     achieved: 2026-04-11
+  T10:
+    name: Backend-unreachable JSON-RPC error envelopes carry a structured `data` field identifying the backend
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'The synthesised -32001 envelope for an unreachable URL backend includes a `data` field with `{backend: {name, url}}`'
+    - The data field never escapes through to a stdio backend's error path (URL backends only)
+    - 'Transparency invariant unchanged: the field rides on the existing -32001 envelope; no new MCP messages, no inspection of agent traffic, no new wire-protocol field between wrapper and daemon'
+    - An e2e test asserts the data field shape against a deliberately unreachable URL backend
+    context: 'When an HTTP backend is unreachable past the per-call deadline, the wrapper synthesises `{code: -32001, message: "mcpbridge: upstream unreachable past timeout"}` (🎯T7.1). The message is opaque — the agent cannot tell *which* backend timed out (mcpbridge may be proxying several), so it cannot do anything beyond retry. Adding a structured `data` field that names the backend (config name + URL) lets the agent or its environment surface an actionable failure without changing anything about the wrapped server''s protocol. This stays inside the transparency invariant: the field rides on an envelope mcpbridge already synthesises; no new MCP messages are minted, no agent traffic is inspected, no new wire-protocol field between wrapper and daemon. Forked from spyder triage (sessions fb7b365a-7 / eaca1054-2, 2026-05-09) where stale `mcpbridge connect` clients could not tell the user which backend was unreachable. The original target included supervisor (launchd/systemd) detection; that half was dropped 2026-05-10 as scope creep — figuring out whether a backend has a service-manager unit is the environment''s job, not mcpbridge''s. See 🎯T11 for the broader scope review that triggered the demotion.'
+    tags:
+    - resilience
+    - operator-experience
+    - http
+    origin: forked from spyder triage 2026-05-09 (sessions fb7b365a-7 / eaca1054-2)
+    discovered: 2026-05-09
+    achieved: 2026-05-10
+  T11:
+    name: The daemon's active install/poll subsystems are reviewed against the transparency invariant; non-essential pieces are set aside or retired
+    status: achieved
+    value: 0.0
+    cost: 0.0
+    acceptance:
+    - 'Each currently-active install/poll subsystem is reviewed against the question: does mcpbridge need to do this, or does an external tool that ends with a binary on disk + the existing fsnotify watcher cover the same ground?'
+    - 'Subsystems in scope: daemon brew source backend, daemon GitHub release source backend, daemon polling scheduler that drives them'
+    - A keep / set-aside / retire decision is recorded for each subsystem, with rationale, in this target's context (or a linked doc / `~/.claude/projects/.../memory` entry)
+    - 'Dependents (config schema, docs, tests) are updated to match each decision: set-aside subsystems get a SetAside reason; retired subsystems are deleted with their dependents removed'
+    - The fsnotify-on-binary-path reload pathway (the keep-the-session-alive core) is preserved end-to-end through any retirements
+    context: 'mcpbridge''s core job is keeping the agent''s MCP session alive while the child swaps underneath — a wrapper-FSM property. The fsnotify watcher delivers swap signals from any external installer (brew upgrade, manual download, cron, future tooling). The currently-shipped *source* backends (`daemon/internal/source/brew.go`, GitHub releases under the same package) and the polling scheduler that drives them go further: mcpbridge actively polls upstream registries, downloads release artifacts, verifies SHA256 sums, and atomically replaces the wrapped binary. That pulls mcpbridge across the line from "transparent proxy" into "I install your software," and inherits a trust model (HTTPS verification, signature checks, rollback policy) that is not core to the proxy contract. The user already runs the install via brew or their own tooling; the daemon''s polling+install duplicates it. Surfaced 2026-05-10 while scoping 🎯T10, which was demoted from supervisor detection for the same reason. Decision pending per backend (keep / set-aside / retire); brew + GitHub are shipped, tested, documented, so set-aside is cheaper than rip-out, and the fsnotify-on-binary-path mechanism keeps "20 running Claude sessions auto-pick-up upgrades" working regardless of which path the user installs through. The decision recorded here also serves as the line for future "let''s add X to mcpbridge" proposals shaped like T10''s first draft.'
+    tags:
+    - scope
+    - architecture
+    - daemon
+    - review
+    origin: discovered while scoping T10 (2026-05-10)
+    discovered: 2026-05-10
+    achieved: 2026-05-13
   T2:
     name: The daemon's brew source backend resolves the brew executable reliably under launchd, where $PATH does not include /opt/homebrew/bin.
     status: achieved
@@ -430,7 +468,6 @@ targets:
     status: achieved
     value: 13.0
     cost: 8.0
-    showcase: true
     actual_cost: 13.0
     acceptance:
     - 'A new `transport_http.{c,h}` implements the `struct transport_ops` vtable against an MCP Streamable HTTP endpoint: HTTP/1.1 POST for client→server, SSE for server→client, single URL.'
@@ -459,7 +496,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     actual_cost: 2.0
     acceptance:
     - '`struct transport_ops` in `wrapper/src/transport.h` exposes message-oriented operations (e.g. `read_frame`, `write_frame`, or equivalent pull/push primitives) in place of the current `read_fd` / `write_fd` pair. The vtable no longer assumes the transport is backed by file descriptors.'
@@ -480,7 +516,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     actual_cost: 8.0
     acceptance:
     - 'New `wrapper/src/transport_http.{c,h}` implements the message-oriented `struct transport_ops` from T3.1 against an MCP Streamable HTTP endpoint: HTTP/1.1 POST for client→server JSON-RPC, SSE (`text/event-stream`) for server→client messages, single URL for both directions.'
@@ -509,7 +544,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     actual_cost: 5.0
     acceptance:
     - '`main.c` accepts `--url URL` as a new flag. When present, the wrapper constructs a `transport_http` (from T3.2) instead of `transport_stdio`; the existing `-- COMMAND [ARGS]` path is untouched and continues to select stdio.'
@@ -534,7 +568,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     actual_cost: 2.0
     acceptance:
     - README.md describes both backend shapes (stdio child vs. HTTP endpoint), states the front-end-is-always-stdio constraint, and links to the config-schema reference.
@@ -556,7 +589,6 @@ targets:
     status: achieved
     value: 20.0
     cost: 13.0
-    showcase: true
     actual_cost: 0.0
     acceptance:
     - The C wrapper no longer understands MCP, HTTP, SSE, or chunked-transfer framing. It exposes a small primitive instruction set (run / connect / read / write / stream / close / wait / snapshot / set_state) over the daemon UDS and nothing else.
@@ -592,7 +624,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     actual_cost: 3.0
     acceptance:
     - docs/wire-protocol.md gains a `v2` section covering every new daemon→wrapper instruction (run, connect, read, write, stream, stop_stream, close, wait) and every new wrapper→daemon event (hello, snapshot, stream_ended, handle_eof, error, ack).
@@ -613,7 +644,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     actual_cost: 0.0
     acceptance:
     - The wrapper implements only the v2 instruction set from 🎯T4.1. No MCP framing, no HTTP, no SSE, no chunked encoding, no URL parser, no dispatch/FSM/initialize-replay logic anywhere in its source.
@@ -638,7 +668,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     actual_cost: 0.0
     acceptance:
     - The daemon (Go) implements MCP wire parsing, JSON-RPC id tracking, in-flight tracking, initialize-caching / replay, and list_changed synthesis on reload — previously in the C wrapper's dispatch.c / mcp.c.
@@ -662,7 +691,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     actual_cost: 0.0
     acceptance:
     - The daemon carries no persistent state file. All per-wrapper state lives in memory during its lifetime and is pushed to the owning wrapper (via `set_state`) whenever it changes meaningfully — e.g. after capturing an MCP-Session-Id, after a completed reload, after a version-seen update.
@@ -689,7 +717,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     actual_cost: 0.0
     acceptance:
     - The v2 daemon accepts hellos from v1 wrappers (still-running v0.x processes) and serves them using the old MCP-aware-in-C protocol semantics, so upgrading the Homebrew formula does not orphan in-flight agent sessions. The v1 handler code path in the daemon is frozen; no new features are added to it.
@@ -712,8 +739,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: 'Confirmed via `make test` — full suite passes (smoke, mcp, fsm, transport_stdio, transport_http, dispatch, daemon_client; e2e_wrapper, e2e_reload, e2e_http_reload all green) under the new unified front door. Verified the help text by hand: `./wrapper/mcpbridge --help` shows only `connect <path>`, and `./wrapper/mcpbridge --url http://x` prints the migration message and exits 2. Wrapper bridges both stdio (e2e_reload, fake_mcp child) and HTTP (e2e_http_reload, fake_http_mcp upstream) backends through the same `mcpbridge connect <config.json>` invocation; switching backends is a config-file edit, not a client-config edit.'
     acceptance:
     - 'The agent''s MCP client config form is identical across stdio and HTTP backends: `mcpbridge connect <name>` (or equivalent JSON `command`+`args` shape).'
     - Switching a server's backend type (stdio↔HTTP) requires only an edit to the daemon-side config; the agent's MCP client config does not change.
@@ -820,7 +845,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
     acceptance:
     - README quickstart uses `mcpbridge connect <path>` with no transport branching
     - agents-guide.md install walkthrough produces a working setup end-to-end with the new form
@@ -850,7 +874,6 @@ targets:
     status: set_aside
     value: 0.0
     cost: 0.0
-    showcase: true
     set_aside_reason: 'Won''t fix — violates mcpbridge''s full-protocol-transparency invariant (synthetic JSON-RPC pings the agent never sent). Resolved at the correct layer: heartbeats enabled on the owned HTTP MCP servers (mnemo, sawmill, spyder). If a third-party HTTP server ever forces the question again, revisit as an opt-in per-config field, off by default.'
     acceptance:
     - wrapper/src/transport_http.c sends a JSON-RPC 'ping' request to the upstream URL on a configurable timer (default ~35-40s — slightly longer than the typical mcp-go server-side WithHeartbeatInterval of 30s)
@@ -870,8 +893,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: 'Built the wrapper with the new resilience pathway, then ran tests/e2e_http_session_invalid_test.sh end-to-end. Sequence demonstrated: (1) initialize + tools/list under session sess-fake-1 succeeds; (2) SIGUSR1 to fake_http_mcp rotates its current session id to sess-fake-2 (simulating an autonomous upstream restart with no daemon involvement); (3) the next tools/list (id=3) POSTs with the now-stale sess-fake-1 and the upstream returns 400 "Bad Request: Invalid session ID"; (4) wrapper logs `http: status 400 ... upstream session is stale, signalling reinit`, then `dispatch: session stale; queuing tools/list for replay after re-init`, then traverses RUNNING → DRAINING → SWAPPING → STARTING → RUNNING with `swap: initialize replayed to new child` and `http: session id captured (sess-fake-2)`; (5) the queued tools/list drains under the new session and the agent receives a response for id=3; (6) tools/list (id=4) succeeds normally under sess-fake-2; (7) tools/list_changed + prompts/list_changed + resources/list_changed all delivered to the stdio client so the agent refetches its registry; (8) the original initialize response appears exactly once in the wrapper''s stdout — the replayed initialize is consumed by dispatch, not forwarded. The agent never saw an error or a disconnect. Test wired into `make test` (Makefile) and passes alongside the daemon-driven reload e2e. The dead-upstream timeout slice (acceptance criterion 4 — TCP-refused tolerance for tens-of-seconds outages) was deferred to a forked T7.1; the rest of T7''s acceptance is satisfied.'
     acceptance:
     - Restart the upstream MCP server (e.g. `brew services restart mnemo`) while a Claude Code session is connected via mcpbridge. The session continues to call tools successfully without any user-visible failure or any need to reconnect, restart the session, or open `/mcp`.
     - 'When the upstream returns 4xx for an Mcp-Session-Id that was valid before the restart (the standard `Bad Request: Invalid session ID` shape), mcpbridge initiates a fresh `initialize` + `notifications/initialized` handshake against the upstream, captures the new Mcp-Session-Id, and silently retries the in-flight tool call (with a small bounded backoff) before returning anything to the stdio client.'
@@ -900,8 +921,6 @@ targets:
     status: achieved
     value: 0.0
     cost: 0.0
-    showcase: true
-    demonstration: 'Built the wrapper with the new outage-tolerance pathway and ran tests/e2e_http_dead_upstream_test.sh. Three subtests, all green: (A) idle-survives — start wrapper + initialize + tools/list, kill upstream, sit idle for 3s, verify the wrapper''s stderr contains zero "http: connect 127.0.0.1" lines (the wrapper does not poll a dead upstream). Restart upstream on the same port; next tools/list succeeds via T7''s autonomous reinit. (B) in-flight-recovers — kill upstream, immediately issue a tools/list, restart upstream within the 10s configured timeout, observe the wrapper''s "retrying in <ms>" log lines during the gap, verify the tools/list response reaches the agent under the new session. (C) in-flight-timeout — short 1500ms tool_call_timeout_ms, kill upstream permanently, issue tools/list (id=3) — wrapper times out and synthesises a JSON-RPC error envelope to the agent (`{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"mcpbridge: upstream unreachable past timeout"}}`). Issue another tools/list (id=4) — wrapper is still alive and produces a second structured error. Stdio session never died. Wrapper''s stderr logs `send_child: upstream unreachable past timeout; synthesising error response` for each call. Test 3 also exercises the unit-level path: tests/transport_http_test.c::test_connection_refused now sets a 200ms timeout against an unreachable port and asserts errno=ETIMEDOUT. Implementation: tcp_connect_with_backoff (transport_http.c) loops with 100ms→500ms→1s→2s→5s capped backoff, computes the deadline once per http_post_once call, returns ETIMEDOUT when the deadline elapses; sink_send_child maps ETIMEDOUT to DISPATCH_SEND_TIMEOUT; dispatch_on_upstream uses mcp_build_error_response (new helper in mcp.c) to synthesise the agent-facing error and decrements in_flight; dispatch_replay_initialize handles a timeout DURING recovery by draining the queue with synthesised errors and signalling main.c to take the FSM back to RUNNING (avoiding the terminal FAILED state). Idle tolerance is automatic — the wrapper polls only its event-loop fds, never the upstream, so there is no polling code to remove.'
     acceptance:
     - mcpbridge never exits because the upstream is unreachable. The stdio session outlives any finite upstream outage — minutes, hours, days — provided the agent isn't actively waiting on a call.
     - While there is no in-flight tool call, mcpbridge does NOT poll the upstream. It sits idle. Connection attempts only happen lazily, when the agent issues the next tool call.

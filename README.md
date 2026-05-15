@@ -18,9 +18,11 @@ mcpbridge is split into two processes:
   config file — the agent's launch command never changes.
 - **`mcpbridge-daemon`** (Go) — one long-lived process per user
   session, typically run under `brew services`. Reads the same
-  config files, polls upgrade sources (Homebrew formulas, GitHub
-  releases), performs the upgrades, and tells connected wrappers
-  when it's time to reload.
+  config files, watches each registered wrapper's child binary via
+  fsnotify, and tells connected wrappers to reload when the binary
+  changes on disk. Upgrades happen via the user's normal install
+  path (`brew upgrade`, manual install, etc.) — the daemon does not
+  poll or install.
 
 The two processes talk over a Unix domain socket. When the daemon
 isn't running, the wrapper still works — it just runs as a pure
@@ -36,10 +38,8 @@ The C code evolves as MCP and its transports evolve, but at a rate
 bounded by those upstream specs — not by our own internal churn.
 
 The daemon runs exactly once per user session, so its resource
-footprint is irrelevant. Go gets us HTTPS, JSON, fsnotify,
-goroutines, and a mature standard library essentially for free —
-and the code that talks to `api.github.com` and Homebrew benefits
-from all of that.
+footprint is irrelevant. Go gets us fsnotify, goroutines, and a
+mature standard library essentially for free.
 
 ## History
 
@@ -98,13 +98,13 @@ upstream MCP server is a replaceable component behind it.
 
 There are two restart paths, both invisible to the agent:
 
-- **Daemon-driven reload.** When `mcpbridge-daemon` notices a newer
-  version of the upstream is installed (e.g. via `brew upgrade`), it
-  broadcasts a reload to every connected wrapper. The wrapper drains
-  its in-flight requests, restarts the upstream, replays the cached
-  `initialize` + `notifications/initialized` against the new instance,
-  and resumes — without the agent ever seeing a disconnect or having
-  to re-issue a request.
+- **Daemon-driven reload.** When a wrapped server's binary changes
+  on disk (e.g. after `brew upgrade`), `mcpbridge-daemon`'s fsnotify
+  watcher detects the change and broadcasts a targeted reload. The
+  wrapper drains its in-flight requests, restarts the upstream,
+  replays the cached `initialize` + `notifications/initialized`
+  against the new instance, and resumes — without the agent ever
+  seeing a disconnect or having to re-issue a request.
 
 - **Autonomous self-reload.** When the upstream restarts on its own
   (a manual `brew services restart`, a crash, an HTTP server cycling)

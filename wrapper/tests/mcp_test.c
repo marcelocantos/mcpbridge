@@ -383,6 +383,98 @@ static void test_build_list_changed(void) {
           "NULL kind rejected");
 }
 
+/* ---------- mcp_build_error_response ---------- */
+
+static void test_build_error_response_no_data(void) {
+    struct mcp_id id = {MCP_ID_INT, {.i = 5}};
+    size_t len = 0;
+    char *buf = mcp_build_error_response(&id, -32001, "oops", NULL, &len);
+    CHECK(buf != NULL, "basic error response built");
+    CHECK(len > 0, "non-empty");
+    CHECK(buf[len - 1] == '\n', "newline-terminated");
+
+    struct mcp_msg m = {0};
+    int rc = mcp_msg_parse(buf, len - 1, &m);
+    CHECK(rc == MCP_PARSE_OK, "parses");
+    CHECK(m.kind == MCP_KIND_RESPONSE, "is response");
+    CHECK(m.id.tag == MCP_ID_INT && m.id.v.i == 5, "id round-trips");
+    CHECK(m.is_error, "is error envelope");
+    mcp_msg_free(&m);
+
+    /* No "data" field should appear. */
+    CHECK(strstr(buf, "\"data\"") == NULL, "no data field when NULL passed");
+    free(buf);
+}
+
+static void test_build_error_response_with_data(void) {
+    struct mcp_id id = {MCP_ID_STRING, {.s = (char *)"req-99"}};
+
+    /* Build the data object the same way dispatch.c does. */
+    cJSON *backend = cJSON_CreateObject();
+    cJSON_AddStringToObject(backend, "name", "spyder");
+    cJSON_AddStringToObject(backend, "url", "http://localhost:3030/mcp");
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddItemToObject(data, "backend", backend);
+
+    size_t len = 0;
+    char *buf = mcp_build_error_response(
+        &id, -32001,
+        "mcpbridge: upstream unreachable past timeout",
+        data, /* ownership transferred; do NOT free data after this */
+        &len);
+
+    CHECK(buf != NULL, "error response with data built");
+    CHECK(len > 0, "non-empty");
+    CHECK(buf[len - 1] == '\n', "newline-terminated");
+
+    /* Parse and verify the outer envelope. */
+    struct mcp_msg m = {0};
+    int rc = mcp_msg_parse(buf, len - 1, &m);
+    CHECK(rc == MCP_PARSE_OK, "parses");
+    CHECK(m.kind == MCP_KIND_RESPONSE, "is response");
+    CHECK(m.id.tag == MCP_ID_STRING && strcmp(m.id.v.s, "req-99") == 0,
+          "string id round-trips");
+    CHECK(m.is_error, "is error envelope");
+    mcp_msg_free(&m);
+
+    /* Deep-check data.backend.{name,url} via cJSON re-parse. */
+    cJSON *root = cJSON_ParseWithLength(buf, len - 1);
+    CHECK(root != NULL, "re-parses as JSON");
+    if (root != NULL) {
+        cJSON *err  = cJSON_GetObjectItemCaseSensitive(root, "error");
+        cJSON *dobj = (err != NULL)
+            ? cJSON_GetObjectItemCaseSensitive(err, "data") : NULL;
+        cJSON *bobj = (dobj != NULL)
+            ? cJSON_GetObjectItemCaseSensitive(dobj, "backend") : NULL;
+
+        CHECK(dobj != NULL, "error.data present");
+        CHECK(bobj != NULL, "error.data.backend present");
+        if (bobj != NULL) {
+            cJSON *name = cJSON_GetObjectItemCaseSensitive(bobj, "name");
+            cJSON *url  = cJSON_GetObjectItemCaseSensitive(bobj, "url");
+            CHECK(cJSON_IsString(name) &&
+                  strcmp(name->valuestring, "spyder") == 0,
+                  "error.data.backend.name == \"spyder\"");
+            CHECK(cJSON_IsString(url) &&
+                  strcmp(url->valuestring, "http://localhost:3030/mcp") == 0,
+                  "error.data.backend.url matches");
+        }
+        cJSON_Delete(root);
+    }
+    free(buf);
+}
+
+static void test_build_error_response_none_id_frees_data(void) {
+    /* Passing MCP_ID_NONE must return NULL and free the data object
+     * (valgrind would catch a leak if it doesn't). */
+    struct mcp_id id = {MCP_ID_NONE, {.i = 0}};
+    cJSON *data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "x", "y");
+    char *buf = mcp_build_error_response(&id, -32001, "msg", data, NULL);
+    CHECK(buf == NULL, "NONE id returns NULL");
+    /* data is now owned by the function and has been freed — no free() here */
+}
+
 int main(void) {
     test_id_equality();
     test_parse_initialize_request();
@@ -404,6 +496,9 @@ int main(void) {
     test_reader_max_length_exact();
     test_reader_growth();
     test_build_list_changed();
+    test_build_error_response_no_data();
+    test_build_error_response_with_data();
+    test_build_error_response_none_id_frees_data();
 
     if (fail_count > 0) {
         fprintf(stderr, "%d mcp_test assertion(s) failed\n", fail_count);

@@ -159,9 +159,12 @@ find the upgrade metadata.
 ```
 
 `config_found` is `false` if no config file matched `name`. The
-wrapper remains registered (so the daemon knows it exists) but
-`polling` will be `false` and no `reload` will ever arrive. The
+wrapper remains registered (so the daemon knows it exists) and the
 wrapper logs a one-line warning.
+
+`polling` is a vestigial field kept in the envelope for backwards
+compatibility; it is always `false`. Reloads still arrive when the
+watcher detects a binary change on disk, regardless of this field.
 
 ### `deregister` (wrapper → daemon)
 

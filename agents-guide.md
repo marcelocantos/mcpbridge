@@ -43,9 +43,9 @@ It's split into two processes:
   client.
 - **`mcpbridge-daemon`** (Go) — one long-lived process per user
   session, typically run under `brew services`. Reads the same
-  per-server config files, polls upgrade sources (Homebrew
-  formulas, GitHub releases), performs upgrades, and tells
-  connected wrappers when to cycle their backends.
+  per-server config files, watches each registered wrapper's child
+  binary via fsnotify, and tells connected wrappers to cycle their
+  backends when the binary changes on disk.
 
 They talk over a user-local Unix domain socket. When the daemon
 isn't running, the wrapper still works — it just runs as a pure
@@ -111,13 +111,7 @@ cat >~/.config/mcpbridge/mnemo.json <<'EOF'
 {
   "schema": 2,
   "name": "mnemo",
-  "command": "/opt/homebrew/bin/mnemo",
-  "source": {
-    "type": "brew",
-    "formula": "marcelocantos/tap/mnemo"
-  },
-  "upgrade": "auto",
-  "check_interval": "30m"
+  "command": "/opt/homebrew/bin/mnemo"
 }
 EOF
 ```
@@ -129,22 +123,13 @@ cat >~/.config/mcpbridge/mnemo.json <<'EOF'
 {
   "schema": 2,
   "name": "mnemo",
-  "url": "http://localhost:19419/mcp",
-  "source": {
-    "type": "brew",
-    "formula": "marcelocantos/tap/mnemo"
-  },
-  "upgrade": "auto",
-  "check_interval": "30m"
+  "url": "http://localhost:19419/mcp"
 }
 EOF
 ```
 
-Full schema reference: `docs/config-schema.md`. Supported source
-types: `brew` (for Homebrew formulas) and `github` (for binaries
-distributed as GitHub releases). Upgrade modes: `off` / `notify` /
-`auto` (default: `notify`). `command` is tilde-expanded; `args`
-are passed verbatim to `execvp`.
+Full schema reference: `docs/config-schema.md`. `command` is
+tilde-expanded; `args` are passed verbatim to `execvp`.
 
 Restart the daemon so it picks up new or changed configs:
 
@@ -226,8 +211,7 @@ Install mcpbridge from https://github.com/marcelocantos/mcpbridge:
   2. `brew services start mcpbridge`
   3. Drop `~/.config/mcpbridge/<name>.json` per the schema in
      docs/config-schema.md, for each MCP server you want to wrap.
-     The file describes the connection (command/args or url) AND
-     the upgrade source.
+     The file describes the connection (command/args or url).
   4. Edit the MCP client config so each wrapped server's command
      becomes `mcpbridge connect ~/.config/mcpbridge/<name>.json`.
      Then restart the client.
@@ -292,10 +276,7 @@ Full reference: `docs/config-schema.md`. Short form (stdio):
 {
   "schema": 2,
   "name": "mnemo",
-  "command": "/opt/homebrew/bin/mnemo",
-  "source": { "type": "brew", "formula": "marcelocantos/tap/mnemo" },
-  "upgrade": "notify",
-  "check_interval": "1h"
+  "command": "/opt/homebrew/bin/mnemo"
 }
 ```
 
@@ -305,9 +286,7 @@ Or HTTP:
 {
   "schema": 2,
   "name": "mnemo",
-  "url": "http://localhost:19419/mcp",
-  "source": { "type": "brew", "formula": "marcelocantos/tap/mnemo" },
-  "upgrade": "notify"
+  "url": "http://localhost:19419/mcp"
 }
 ```
 
@@ -315,11 +294,6 @@ Or HTTP:
   required. The wrapper picks the backend based on which is set.
 - `name` is the identifier the wrapper sends to the daemon on
   registration; it must be unique across all loaded configs.
-- `upgrade` defaults to `notify` (detect + log, don't install).
-  Use `auto` to let the daemon drive the install. `off` disables
-  polling for that server.
-- `source.type` is `brew` or `github`. See `docs/config-schema.md`
-  for the type-specific fields.
 
 ## Troubleshooting
 
@@ -333,10 +307,12 @@ add a `"command": "..."` (or `"url": "..."`) field describing the
 connection. See `docs/config-schema.md` for the migration recipe.
 
 **The wrapper registers but `reload` never arrives.** Check
-`config_found` / `polling` in register_ok. If either is false,
-the config name doesn't match, the config file failed to parse,
-or the upgrade mode is `off`. Check
+`config_found` in register_ok. If it is false, the config name
+doesn't match or the config file failed to parse. Check
 `$(brew --prefix)/var/log/mcpbridge-daemon.log` for parse errors.
+If `config_found=true` but reloads still don't arrive, confirm
+that `child_binary` on register points at the real binary that
+gets replaced on upgrade — the daemon watches that exact path.
 
 **The agent sees an initialize failure after a reload.** The
 wrapped server is broken in a way that the daemon-driven upgrade
@@ -372,15 +348,6 @@ problem.
   `read()` probe on stdin every iteration. If you're debugging a
   hung wrapper, this is why the loop keeps ticking even when
   nothing is happening — it's intentional.
-- **First-poll baselining**. On the very first scheduler tick for
-  a GitHub-source config, no install happens even if the latest
-  release is newer than what's on disk. The daemon can't tell
-  which release you have installed locally without asking the
-  binary (which many binaries can't tell you anyway), so it caches
-  "whatever GitHub says is current right now" as the baseline and
-  triggers only when that value changes. If you need an immediate
-  upgrade, `SIGHUP` the daemon after the next real release, or
-  run `brew upgrade` yourself and let fsnotify pick up the change.
 - **Wire protocol v1 vs. config schema v2 are independent**. The
   daemon↔wrapper UDS protocol has its own schema version
   (`v: 1` in envelopes). The per-server JSON config files have

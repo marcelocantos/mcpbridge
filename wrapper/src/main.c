@@ -884,6 +884,9 @@ int main(int argc, char **argv) {
         config_free(cfg);
         return 1;
     }
+    if (cfg->backend == CONFIG_BACKEND_HTTP) {
+        dispatch_set_backend_id(d, cfg->name, cfg->url);
+    }
     ctx.dispatch = d;
 
     /* Best-effort daemon connect at startup. Failure is logged once

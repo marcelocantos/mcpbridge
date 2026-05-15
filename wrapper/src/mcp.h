@@ -20,6 +20,8 @@
  * This module is pure: no I/O, no globals, no state-machine
  * dependencies. The event loop owns the fds and feeds bytes in. */
 
+#include "cJSON.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -177,13 +179,22 @@ char *mcp_build_list_changed(const char *kind, size_t *out_len);
  * have no id, so passing MCP_ID_NONE returns NULL). `message` must
  * be a UTF-8 string with no control characters; characters outside
  * the JSON-safe range are not escaped beyond what cJSON does
- * automatically. Returns a buffer terminated by a single '\n'.
- * Caller owns the buffer (free() when done). out_len, if non-NULL,
- * receives the buffer length including the newline. Returns NULL on
- * allocation failure or invalid id. */
+ * automatically.
+ *
+ * `data` is an optional cJSON object to attach as the `error.data`
+ * field (🎯T10). This function takes ownership of `data` regardless
+ * of outcome: it is either attached to the envelope (success) or
+ * deleted (all early-return failure paths). Pass NULL to omit the
+ * field. The caller must NOT free `data` after calling this function.
+ *
+ * Returns a buffer terminated by a single '\n'. Caller owns the
+ * buffer (free() when done). out_len, if non-NULL, receives the
+ * buffer length including the newline. Returns NULL on allocation
+ * failure or invalid id. */
 char *mcp_build_error_response(const struct mcp_id *id,
                                int code,
                                const char *message,
+                               cJSON *data,
                                size_t *out_len);
 
 #endif /* MCPBRIDGE_MCP_H */
