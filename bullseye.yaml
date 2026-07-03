@@ -487,9 +487,10 @@ targets:
     discovered: 2026-07-02
   T14:
     name: mcpbridge daemon shutdown never deletes a successor daemon's live socket
-    status: identified
+    status: set_aside
     value: 8.0
     cost: 3.0
+    set_aside_reason: 'Refuted by two-lens re-verification (2026-07-03): the redundant os.Remove at server.go:162 is not the deleting agent — Go''s *net.UnixListener.Close() already unlinks the socket path unconditionally, so dropping the os.Remove would not prevent successor-socket deletion. Deployment also serializes daemons (brew services/launchd wait for exit before relaunch), so the "delete a successor''s live socket" window never opens on the supported path. The genuine orphan/steal hazard is the startup unlink at server.go:96 (already tracked as T13) plus ln.Close()''s unconditional unlink. Line 162 is a harmless cleanup nit — false positive as a high-severity finding.'
     acceptance:
     - Server.Close() does not os.Remove the socket path that ln.Close already unlinked
     - A restart handoff leaves the successor daemon's socket intact
