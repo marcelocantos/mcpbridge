@@ -42,6 +42,12 @@ struct fake_sink_state {
      * having invalidated our session — without this hook, dispatch's
      * stale-recovery pathway is unreachable from a unit test. */
     int            stale_returns_remaining;
+
+    /* When non-zero, the next N calls to fake_send_child return
+     * DISPATCH_SEND_UPSTREAM_ERROR — a per-request upstream failure on
+     * a still-usable transport (HTTP 5xx / truncated body). Used to
+     * exercise the survive-and-surface-error path (🎯T17). */
+    int            upstream_error_returns_remaining;
 };
 
 static void fake_send_upstream(void *ctx, const void *bytes, size_t n) {
@@ -58,6 +64,10 @@ static int fake_send_child(void *ctx, const void *bytes, size_t n) {
     if (s->stale_returns_remaining > 0) {
         s->stale_returns_remaining--;
         return DISPATCH_SEND_STALE;
+    }
+    if (s->upstream_error_returns_remaining > 0) {
+        s->upstream_error_returns_remaining--;
+        return DISPATCH_SEND_UPSTREAM_ERROR;
     }
     if (s->child_len + n > FAKE_BUF_CAP) {
         return DISPATCH_SEND_OK;
@@ -747,6 +757,61 @@ static void test_stale_send_surfaces_error_for_side_effecting(void) {
     dispatch_free(d);
 }
 
+static void test_upstream_error_surfaces_error_and_survives(void) {
+    /* When send_child returns DISPATCH_SEND_UPSTREAM_ERROR for a
+     * request (e.g. the HTTP backend answered 503, or reset the body
+     * mid-stream), dispatch must:
+     *   - undo the in-flight increment
+     *   - synthesise a structured -32003 error carrying the request id
+     *   - emit NO FSM event (no reload, no exit) so the wrapper stays
+     *     alive and keeps serving the same session. 🎯T17. */
+    struct fsm f;
+    fsm_init(&f);
+    fsm_step(&f, FSM_EV_INITIALIZE_OK);
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    struct mcp_msg init_req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}");
+    struct mcp_msg init_resp = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
+    dispatch_on_upstream(d, &init_req);
+    dispatch_on_child(d, &init_resp);
+
+    memset(&sink_state, 0, sizeof(sink_state));
+    sink_state.upstream_error_returns_remaining = 1;
+
+    struct mcp_msg req = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":77,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"do_thing\"}}");
+    dispatch_on_upstream(d, &req);
+
+    CHECK(dispatch_in_flight(d) == 0,
+          "in_flight rolled back after upstream error");
+    sink_state.up_buf[sink_state.up_len < FAKE_BUF_CAP
+                          ? sink_state.up_len : FAKE_BUF_CAP - 1] = '\0';
+    CHECK(strstr(sink_state.up_buf, "\"id\":77") != NULL,
+          "error response carries the original request id");
+    CHECK(strstr(sink_state.up_buf, "\"error\"") != NULL,
+          "structured error surfaced to agent");
+    CHECK(strstr(sink_state.up_buf, "-32003") != NULL,
+          "upstream-request-failed error code present");
+    CHECK(sink_state.event_count == 0,
+          "no FSM event emitted — wrapper survives (no reload, no exit)");
+
+    mcp_msg_free(&init_req);
+    mcp_msg_free(&init_resp);
+    mcp_msg_free(&req);
+    dispatch_free(d);
+}
+
 static void test_replay_noop_without_cache(void) {
     struct fsm f;
     fsm_init(&f);
@@ -782,6 +847,7 @@ int main(void) {
     test_replay_error_no_list_changed();
     test_stale_send_requeues_and_triggers_reload();
     test_stale_send_surfaces_error_for_side_effecting();
+    test_upstream_error_surfaces_error_and_survives();
     test_replay_noop_without_cache();
 
     if (fail_count > 0) {

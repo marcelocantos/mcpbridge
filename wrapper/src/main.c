@@ -274,6 +274,19 @@ static int sink_send_child(void *ctx, const void *bytes, size_t n) {
                  "synthesising error response");
         return DISPATCH_SEND_TIMEOUT;
     }
+    if (errno == EPROTO || errno == ECONNABORTED || errno == ECONNREFUSED) {
+        /* A single upstream request failed: HTTP 5xx, a truncated or
+         * reset response body, malformed framing, or a refused
+         * connection to a restarting localhost backend. The HTTP
+         * transport remains usable for the next request — and only the
+         * HTTP transport produces these errnos; the stdio transport
+         * signals a dead child via EPIPE/EBADF, which stay fatal
+         * below. Surface a JSON-RPC error for THIS request and keep
+         * the wrapper alive, mirroring the ETIMEDOUT path (🎯T17). */
+        log_warn("send_child: upstream request failed (%s); "
+                 "synthesising error response", strerror(errno));
+        return DISPATCH_SEND_UPSTREAM_ERROR;
+    }
     log_error("send_child: transport_send failed: %s", strerror(errno));
     c->exit_requested = 1;
     return DISPATCH_SEND_FATAL;

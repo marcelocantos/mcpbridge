@@ -70,7 +70,7 @@ func TestWatcher_DetectsWriteAndFiresReload(t *testing.T) {
 	bc := &fakeBcast{}
 	w, _ := startWatcher(t, bc)
 
-	if err := w.Track("mnemo", binPath); err != nil {
+	if err := w.Track(1, "mnemo", binPath); err != nil {
 		t.Fatalf("Track: %v", err)
 	}
 
@@ -109,7 +109,7 @@ func TestWatcher_IgnoresUnrelatedFiles(t *testing.T) {
 
 	bc := &fakeBcast{}
 	w, _ := startWatcher(t, bc)
-	if err := w.Track("mnemo", binPath); err != nil {
+	if err := w.Track(1, "mnemo", binPath); err != nil {
 		t.Fatal(err)
 	}
 
@@ -130,7 +130,7 @@ func TestWatcher_CoalescesRapidEvents(t *testing.T) {
 
 	bc := &fakeBcast{}
 	w, _ := startWatcher(t, bc)
-	w.Track("foo", binPath)
+	w.Track(1, "foo", binPath)
 
 	// Three rapid writes should coalesce into one reload.
 	os.WriteFile(binPath, []byte("v2"), 0o755)
@@ -159,8 +159,8 @@ func TestWatcher_UntrackStopsFiring(t *testing.T) {
 
 	bc := &fakeBcast{}
 	w, _ := startWatcher(t, bc)
-	w.Track("foo", binPath)
-	w.Untrack("foo")
+	w.Track(1, "foo", binPath)
+	w.Untrack(1)
 
 	os.WriteFile(binPath, []byte("v2"), 0o755)
 	time.Sleep(300 * time.Millisecond)
@@ -180,9 +180,9 @@ func TestWatcher_OnRegisterSkipsURLBackend(t *testing.T) {
 		"http://localhost:3030/mcp",
 		"https://example.com/mcp",
 	} {
-		w.OnRegister("urlbackend", url)
+		w.OnRegister(1, "urlbackend", url)
 		w.mu.Lock()
-		_, tracked := w.byName["urlbackend"]
+		_, tracked := w.byConn[1]
 		w.mu.Unlock()
 		if tracked {
 			t.Errorf("OnRegister(%q) should not have tracked a URL", url)
@@ -200,7 +200,7 @@ func TestWatcher_OnRegisterAndOnDeregisterBridge(t *testing.T) {
 	bc := &fakeBcast{}
 	w, _ := startWatcher(t, bc)
 
-	w.OnRegister("foo", binPath)
+	w.OnRegister(1, "foo", binPath)
 	os.WriteFile(binPath, []byte("v2"), 0o755)
 
 	deadline := time.Now().Add(1 * time.Second)
@@ -214,13 +214,68 @@ func TestWatcher_OnRegisterAndOnDeregisterBridge(t *testing.T) {
 		t.Fatal("OnRegister should have enabled tracking")
 	}
 
-	w.OnDeregister("foo")
+	w.OnDeregister(1, "foo")
 	prev := bc.count.Load()
 
 	os.WriteFile(binPath, []byte("v3"), 0o755)
 	time.Sleep(300 * time.Millisecond)
 	if bc.count.Load() != prev {
 		t.Errorf("OnDeregister should have stopped tracking: %d -> %d",
+			prev, bc.count.Load())
+	}
+}
+
+// TestWatcher_SharedNameDeregisterKeepsLiveWatch pins Fable-5 F4 /
+// T16: two wrappers register the SAME name+binary (a common
+// multi-client case — two Claude sessions each wrapping mnemo). When
+// one deregisters, the still-connected peer's binary MUST stay
+// watched, so an out-of-band upgrade still fires a reload. With the
+// pre-fix name-keyed bookkeeping the first deregister wiped the shared
+// watch and the live wrapper went silent.
+func TestWatcher_SharedNameDeregisterKeepsLiveWatch(t *testing.T) {
+	dir := shortTempDir(t)
+	binPath := filepath.Join(dir, "mnemo")
+	if err := os.WriteFile(binPath, []byte("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	bc := &fakeBcast{}
+	w, _ := startWatcher(t, bc)
+
+	// Two distinct connections, same name + same binary.
+	w.OnRegister(1, "mnemo", binPath) // wrapper A
+	w.OnRegister(2, "mnemo", binPath) // wrapper B
+
+	// Wrapper A deregisters; wrapper B is still connected.
+	w.OnDeregister(1, "mnemo")
+
+	// Out-of-band upgrade of the still-watched binary.
+	if err := os.WriteFile(binPath, []byte("v2 (brew upgrade)"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if bc.count.Load() > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if bc.count.Load() == 0 {
+		t.Fatal("live wrapper (conn 2) got 0 reloads after the binary " +
+			"changed; conn 1's deregister wiped the shared watch")
+	}
+
+	// And once the last registration for the name is gone, the watch
+	// is torn down (no further reloads).
+	w.OnDeregister(2, "mnemo")
+	prev := bc.count.Load()
+	if err := os.WriteFile(binPath, []byte("v3"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if bc.count.Load() != prev {
+		t.Errorf("after the last deregister the watch should be gone: %d -> %d",
 			prev, bc.count.Load())
 	}
 }
