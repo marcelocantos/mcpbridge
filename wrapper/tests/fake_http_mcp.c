@@ -45,6 +45,12 @@ static int verbose = 0;
  * re-initialise. */
 static char current_session_id[64] = "sess-fake-1";
 
+/* When set (via --fail-5xx-method), any request whose JSON-RPC method
+ * equals this string is answered with HTTP 503 Service Unavailable —
+ * the "backend is restarting / transiently unhealthy" shape. Used by
+ * the per-request-failure survival e2e (Fable-5 F5). */
+static char fail_5xx_method[64] = "";
+
 static void handle_sig(int s) {
     (void)s;
     stopping = 1;
@@ -302,6 +308,27 @@ static void serve_one(int cfd) {
 
     logv("request: method=%s", method);
 
+    /* Forced per-request 5xx: simulate a transiently-unhealthy backend
+     * for a chosen method. The transport stays usable for the next
+     * request, so the wrapper must surface an error for THIS call and
+     * survive rather than tearing down the whole session (Fable-5 F5). */
+    if (fail_5xx_method[0] != '\0' && strcmp(method, fail_5xx_method) == 0) {
+        logv("response: 503 (forced for method %s)", method);
+        const char err_body[] = "Service Unavailable";
+        char hdr[256];
+        int hn = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 503 Service Unavailable\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: %zu\r\n"
+            "Connection: close\r\n"
+            "\r\n",
+            sizeof(err_body) - 1);
+        write_all(cfd, hdr, (size_t)hn);
+        write_all(cfd, err_body, sizeof(err_body) - 1);
+        cJSON_Delete(parsed);
+        return;
+    }
+
     /* Reject any non-initialize request whose session id doesn't
      * match the current one. This is the canonical session-loss
      * shape — what mcp-go's session middleware does after a restart.
@@ -368,6 +395,11 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "-v") == 0) {
             verbose = 1;
+            continue;
+        }
+        if (strcmp(argv[i], "--fail-5xx-method") == 0 && i + 1 < argc) {
+            snprintf(fail_5xx_method, sizeof(fail_5xx_method), "%s",
+                     argv[++i]);
             continue;
         }
         fprintf(stderr, "fake_http_mcp: unknown arg: %s\n", argv[i]);

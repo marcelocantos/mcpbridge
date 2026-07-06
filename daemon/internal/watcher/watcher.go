@@ -35,19 +35,29 @@ type Broadcaster interface {
 // back-to-back reloads.
 const DefaultCoalesceWindow = 300 * time.Millisecond
 
-// Watcher tracks a set of (name, absolutePath) pairs and broadcasts
-// a reload to each corresponding name when its path changes.
+// watchEntry records what one connection registered. Bookkeeping is
+// keyed by connection id (not by name) so two wrappers sharing a name
+// each hold an independent watch reference.
+type watchEntry struct {
+	name string // config name this connection registered under
+	abs  string // absolute path being watched
+	dir  string // parent dir (what fsnotify actually watches)
+}
+
+// Watcher tracks a set of per-connection (name, absolutePath)
+// registrations and broadcasts a reload to the matching name(s) when a
+// watched path changes.
 type Watcher struct {
 	fs       *fsnotify.Watcher
 	bcast    Broadcaster
 	coalesce time.Duration
 
 	mu     sync.Mutex
-	byName map[string]string   // name -> absolute path
-	byFile map[string][]string // absolute path -> names (same path can front multiple wrappers)
-	dirs   map[string]int      // parent dir -> refcount (fsnotify watches dirs, not files)
+	byConn map[uint64]watchEntry // connection id -> what it registered
+	dirs   map[string]int        // parent dir -> refcount (one per live registration)
 
-	// pending coalesces rapid event bursts per name.
+	// pending coalesces rapid event bursts per name (reload is
+	// name-targeted, so the debounce timer stays name-keyed).
 	pending map[string]*time.Timer
 }
 
@@ -63,8 +73,7 @@ func New(bcast Broadcaster) (*Watcher, error) {
 		fs:       fs,
 		bcast:    bcast,
 		coalesce: DefaultCoalesceWindow,
-		byName:   make(map[string]string),
-		byFile:   make(map[string][]string),
+		byConn:   make(map[uint64]watchEntry),
 		dirs:     make(map[string]int),
 		pending:  make(map[string]*time.Timer),
 	}, nil
@@ -124,7 +133,7 @@ func (w *Watcher) Close() error {
 // wrappers report their upstream URL here; there is nothing on the
 // local filesystem to watch, so URL-shaped values are skipped
 // silently.
-func (w *Watcher) OnRegister(name, childBinary string) {
+func (w *Watcher) OnRegister(connID uint64, name, childBinary string) {
 	if childBinary == "" {
 		return
 	}
@@ -133,7 +142,7 @@ func (w *Watcher) OnRegister(name, childBinary string) {
 			"name", name, "url", childBinary)
 		return
 	}
-	if err := w.Track(name, childBinary); err != nil {
+	if err := w.Track(connID, name, childBinary); err != nil {
 		slog.Warn("watcher: track failed",
 			"name", name, "path", childBinary, "err", err)
 	}
@@ -147,18 +156,20 @@ func isURL(s string) bool {
 }
 
 // OnDeregister implements socket.RegistrationHandler. It stops
-// watching the wrapper's child_binary path.
-func (w *Watcher) OnDeregister(name string) {
-	if err := w.Untrack(name); err != nil {
+// watching the path the given connection registered.
+func (w *Watcher) OnDeregister(connID uint64, name string) {
+	if err := w.Untrack(connID); err != nil {
 		slog.Warn("watcher: untrack failed", "name", name, "err", err)
 	}
 }
 
-// Track starts watching the absolute path associated with a
-// registered wrapper name. If the same name is tracked again with
-// a different path, the previous path is replaced. Not thread-safe
-// with Run's event loop on the same path — but fsnotify itself is.
-func (w *Watcher) Track(name, path string) error {
+// Track starts watching the absolute path a registered connection
+// reported. Bookkeeping is keyed by connection id, so two wrappers
+// sharing a name each hold an independent watch reference and
+// deregistering one leaves the others' watches intact. A repeated
+// (connID, path) is a no-op; the same connection re-registering a
+// different path replaces its own prior reference.
+func (w *Watcher) Track(connID uint64, name, path string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -168,65 +179,71 @@ func (w *Watcher) Track(name, path string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	// If name is already tracked at the same path, nothing to do.
-	if existing, ok := w.byName[name]; ok && existing == abs {
-		return nil
-	}
-	// Remove any prior mapping for this name.
-	if existing, ok := w.byName[name]; ok {
-		w.removeNameLocked(name, existing)
+	if e, ok := w.byConn[connID]; ok {
+		if e.abs == abs && e.name == name {
+			return nil
+		}
+		// This connection re-registered under a different name/path:
+		// drop its old reference before taking the new one.
+		w.removeConnLocked(connID)
 	}
 
-	w.byName[name] = abs
-	w.byFile[abs] = append(w.byFile[abs], name)
-
-	// Reference-count dir watches so two binaries in the same
-	// directory don't try to add the same watch twice.
+	// Reference-count dir watches so multiple registrations in the
+	// same directory add the fsnotify watch exactly once.
 	if w.dirs[dir] == 0 {
 		if err := w.fs.Add(dir); err != nil {
-			delete(w.byName, name)
-			w.byFile[abs] = sliceRemove(w.byFile[abs], name)
-			if len(w.byFile[abs]) == 0 {
-				delete(w.byFile, abs)
-			}
 			return err
 		}
 	}
 	w.dirs[dir]++
+	w.byConn[connID] = watchEntry{name: name, abs: abs, dir: dir}
 	return nil
 }
 
-// Untrack stops watching a previously tracked name. Idempotent.
-func (w *Watcher) Untrack(name string) error {
+// Untrack stops watching the path a connection registered. Idempotent.
+func (w *Watcher) Untrack(connID uint64) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-
-	path, ok := w.byName[name]
-	if !ok {
-		return nil
-	}
-	w.removeNameLocked(name, path)
+	w.removeConnLocked(connID)
 	return nil
 }
 
-// removeNameLocked tears down the bookkeeping for one (name, path)
-// pair. Caller holds w.mu.
-func (w *Watcher) removeNameLocked(name, path string) {
-	delete(w.byName, name)
-	w.byFile[path] = sliceRemove(w.byFile[path], name)
-	if len(w.byFile[path]) == 0 {
-		delete(w.byFile, path)
+// removeConnLocked tears down one connection's watch reference. The
+// fsnotify dir watch is dropped only when the LAST registration in
+// that directory is gone, so a same-directory (or same-name) peer
+// keeps its watch. Caller holds w.mu.
+func (w *Watcher) removeConnLocked(connID uint64) {
+	e, ok := w.byConn[connID]
+	if !ok {
+		return
 	}
-	dir := filepath.Dir(path)
-	w.dirs[dir]--
-	if w.dirs[dir] <= 0 {
-		delete(w.dirs, dir)
-		_ = w.fs.Remove(dir)
+	delete(w.byConn, connID)
+
+	w.dirs[e.dir]--
+	if w.dirs[e.dir] <= 0 {
+		delete(w.dirs, e.dir)
+		_ = w.fs.Remove(e.dir)
 	}
-	if t, ok := w.pending[name]; ok {
-		t.Stop()
-		delete(w.pending, name)
+
+	// Cancel any pending coalesced reload for this name only if no
+	// other connection is still registered under it.
+	if !w.nameTrackedLocked(e.name) {
+		if t, ok := w.pending[e.name]; ok {
+			t.Stop()
+			delete(w.pending, e.name)
+		}
 	}
+}
+
+// nameTrackedLocked reports whether any connection is still registered
+// under name. Caller holds w.mu.
+func (w *Watcher) nameTrackedLocked(name string) bool {
+	for _, e := range w.byConn {
+		if e.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // handleEvent is called for every fsnotify event on any directory
@@ -240,12 +257,16 @@ func (w *Watcher) handleEvent(ev fsnotify.Event) {
 		return
 	}
 	w.mu.Lock()
-	names := append([]string(nil), w.byFile[ev.Name]...)
+	var names []string
+	seen := make(map[string]bool)
+	for _, e := range w.byConn {
+		if e.abs == ev.Name && !seen[e.name] {
+			seen[e.name] = true
+			names = append(names, e.name)
+		}
+	}
 	coalesce := w.coalesce
 	w.mu.Unlock()
-	if len(names) == 0 {
-		return
-	}
 	for _, name := range names {
 		w.scheduleReload(name, coalesce)
 	}
@@ -267,13 +288,4 @@ func (w *Watcher) scheduleReload(name string, coalesce time.Duration) {
 	})
 	w.pending[name] = t
 	w.mu.Unlock()
-}
-
-func sliceRemove(s []string, v string) []string {
-	for i, x := range s {
-		if x == v {
-			return append(s[:i], s[i+1:]...)
-		}
-	}
-	return s
 }

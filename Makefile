@@ -33,8 +33,13 @@ test: wrapper-test daemon-test
 wrapper-test: daemon
 	$(MAKE) -C wrapper test VERSION=$(VERSION)
 
+# -race is load-bearing here: the daemon's concurrency contract (push
+# methods vs the per-connection serve goroutine) is only enforced by
+# the race detector. Without it, data races on shared *conn state ship
+# silently (see docs/audit/fable-2026-07.md F3). Both CI runners
+# (ubuntu, macos) support -race.
 daemon-test:
-	cd daemon && go test ./...
+	cd daemon && go test -race ./...
 
 clean: wrapper-clean daemon-clean
 

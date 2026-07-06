@@ -17,6 +17,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 )
 
 // MaxLineBytes is the maximum size of one wire-protocol line. Bigger
@@ -58,12 +59,16 @@ type ConfigLookup func(name string) (found bool, polling bool)
 type RegistrationHandler interface {
 	// OnRegister is called after the server has accepted a
 	// register envelope and sent register_ok. childBinary is the
-	// installed path the wrapper reported.
-	OnRegister(name, childBinary string)
+	// installed path the wrapper reported. connID is a stable,
+	// per-connection identity so the handler can key its bookkeeping
+	// by connection rather than by name (two wrappers may register
+	// the same name — "unusual but legal").
+	OnRegister(connID uint64, name, childBinary string)
 	// OnDeregister is called when a wrapper explicitly sends
 	// deregister OR when its connection closes (clean or
-	// otherwise). Called exactly once per registration.
-	OnDeregister(name string)
+	// otherwise). Called exactly once per registration, with the same
+	// connID passed to the matching OnRegister.
+	OnDeregister(connID uint64, name string)
 }
 
 // Server listens on a Unix domain socket and accepts wrapper
@@ -75,9 +80,25 @@ type Server struct {
 	lookup   ConfigLookup
 	regH     RegistrationHandler
 
+	// lockFile holds an exclusive advisory flock for this server's
+	// lifetime, enforcing the single-daemon-per-socket invariant.
+	// Released (fd closed) in Close.
+	lockFile *os.File
+
 	mu     sync.Mutex
 	conns  map[uint64]*conn // keyed by internal connection id
 	nextID uint64
+}
+
+// releaseLock drops the advisory lock and closes its file descriptor.
+// Closing the fd alone releases the flock; the explicit unlock keeps
+// intent obvious. Safe with a nil argument.
+func releaseLock(f *os.File) {
+	if f == nil {
+		return
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
 }
 
 // NewServer creates a server bound to the given socket path. The
@@ -90,23 +111,55 @@ func NewServer(sockPath string, lookup ConfigLookup) (*Server, error) {
 	if _, err := EnsureSocketDir(sockPath); err != nil {
 		return nil, err
 	}
-	// Remove a stale socket from a previous run. If it is still in
-	// use by a live daemon, the bind below will fail and the user
-	// can investigate.
-	_ = os.Remove(sockPath)
+
+	// Enforce "exactly one daemon per socket path" with an exclusive
+	// advisory lock on a sibling lockfile. flock is tied to the open
+	// file description, so the kernel releases it automatically if the
+	// daemon crashes — a later daemon can then reclaim the path. If a
+	// LIVE daemon already holds the lock, LOCK_NB fails and we refuse
+	// to start rather than unlinking its live socket. The pre-fix code
+	// unconditionally os.Remove()d the socket here, so a second daemon
+	// silently stole the endpoint and orphaned the first's wrappers.
+	// The lockfile is intentionally never unlinked: removing it would
+	// let a concurrent starter lock a different inode and defeat the
+	// guard.
+	lockPath := sockPath + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open lock %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lockFile.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf(
+				"another mcpbridge daemon already owns %s", sockPath)
+		}
+		return nil, fmt.Errorf("flock %s: %w", lockPath, err)
+	}
+
+	// We hold the lock, so any socket file at this path is a stale
+	// inode from a daemon that has already exited — safe to unlink
+	// before binding.
+	if err := os.Remove(sockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		releaseLock(lockFile)
+		return nil, fmt.Errorf("remove stale socket %s: %w", sockPath, err)
+	}
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
+		releaseLock(lockFile)
 		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
 	}
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		ln.Close()
+		releaseLock(lockFile)
 		return nil, fmt.Errorf("chmod %s: %w", sockPath, err)
 	}
 	return &Server{
 		sockPath: sockPath,
 		ln:       ln,
 		lookup:   lookup,
+		lockFile: lockFile,
 		conns:    make(map[uint64]*conn),
 	}, nil
 }
@@ -154,12 +207,17 @@ func (s *Server) Close() error {
 	s.mu.Lock()
 	conns := s.conns
 	s.conns = map[uint64]*conn{}
+	lockFile := s.lockFile
+	s.lockFile = nil
 	s.mu.Unlock()
 
 	for _, c := range conns {
 		c.close()
 	}
 	_ = os.Remove(s.sockPath)
+	// Release the singleton lock last, so the path is fully torn down
+	// before another daemon can reclaim it.
+	releaseLock(lockFile)
 	return nil
 }
 
@@ -181,25 +239,32 @@ func (s *Server) Registrations() []Registration {
 // wrapper with the given reason. Used by SIGHUP as a "reload
 // everything" knob.
 func (s *Server) BroadcastReload(reason string) {
+	// Capture the name alongside the conn while holding the lock so we
+	// never dereference c.reg after releasing s.mu (the send loop runs
+	// unlocked).
+	type target struct {
+		c    *conn
+		name string
+	}
 	s.mu.Lock()
-	conns := make([]*conn, 0, len(s.conns))
+	targets := make([]target, 0, len(s.conns))
 	for _, c := range s.conns {
 		if c.reg != nil {
-			conns = append(conns, c)
+			targets = append(targets, target{c: c, name: c.reg.Name})
 		}
 	}
 	s.mu.Unlock()
 
-	for _, c := range conns {
+	for _, t := range targets {
 		env := &Envelope{
 			Type:   TypeReload,
-			Seq:    c.nextSeq(),
-			Name:   c.reg.Name,
+			Seq:    t.c.nextSeq(),
+			Name:   t.name,
 			Reason: reason,
 		}
-		if err := c.send(env); err != nil {
+		if err := t.c.send(env); err != nil {
 			slog.Warn("broadcast reload: send failed",
-				"name", c.reg.Name, "err", err)
+				"name", t.name, "err", err)
 		}
 	}
 }
@@ -347,13 +412,22 @@ func (c *conn) serve() {
 			fmt.Sprintf("expected register, got %s", reg.Type))
 		return
 	}
-	c.reg = &Registration{
+	registration := &Registration{
 		Name:        reg.Name,
 		Pid:         hello.Pid,
 		ChildPid:    reg.ChildPid,
 		ChildBinary: reg.ChildBinary,
 		conn:        c,
 	}
+	// Publish c.reg under s.mu. The conn is already in s.conns, and the
+	// push methods (BroadcastReload / ReloadName / ChildBinaryForName /
+	// Registrations) read c.reg on other goroutines while holding s.mu,
+	// so the write must be synchronised by the same lock. Reads of
+	// c.reg later in serve()/cleanup() run on this goroutine (the sole
+	// writer) and need no lock.
+	c.server.mu.Lock()
+	c.reg = registration
+	c.server.mu.Unlock()
 	var configFound, polling bool
 	if c.server.lookup != nil {
 		configFound, polling = c.server.lookup(reg.Name)
@@ -376,7 +450,7 @@ func (c *conn) serve() {
 	regH := c.server.regH
 	c.server.mu.Unlock()
 	if regH != nil {
-		regH.OnRegister(c.reg.Name, c.reg.ChildBinary)
+		regH.OnRegister(c.id, c.reg.Name, c.reg.ChildBinary)
 	}
 	slog.Info("conn: registered",
 		"id", c.id,
@@ -471,6 +545,6 @@ func (c *conn) cleanup() {
 	// Fire OnDeregister exactly once per successful register. If
 	// the connection never reached the registered state, skip.
 	if regH != nil && c.reg != nil {
-		regH.OnDeregister(c.reg.Name)
+		regH.OnDeregister(c.id, c.reg.Name)
 	}
 }

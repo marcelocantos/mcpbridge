@@ -49,6 +49,15 @@ struct mcp_msg;
 #define DISPATCH_SEND_STALE  -1
 #define DISPATCH_SEND_FATAL  -2
 #define DISPATCH_SEND_TIMEOUT -3
+/* A single upstream request failed (HTTP 5xx, a truncated/reset
+ * response body, malformed framing, or a refused connection to a
+ * restarting localhost backend), but the transport itself remains
+ * usable for the next request. Like TIMEOUT, this is per-request and
+ * recoverable: dispatch synthesises a JSON-RPC error for the failing
+ * request and the wrapper stays alive. Only FATAL — a genuinely
+ * unusable transport, e.g. a dead stdio child — tears the wrapper
+ * down. */
+#define DISPATCH_SEND_UPSTREAM_ERROR -4
 
 /* Callbacks the dispatch layer uses to emit its decisions. The ctx
  * pointer is passed back unchanged on every call. */

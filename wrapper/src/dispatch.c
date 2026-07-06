@@ -319,6 +319,33 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
             }
             return;
         }
+        if (rc == DISPATCH_SEND_UPSTREAM_ERROR) {
+            /* A single upstream request failed but the transport is
+             * still usable (HTTP 5xx, truncated/reset body, malformed
+             * framing, or a refused connection to a restarting
+             * backend). Surface a JSON-RPC error for THIS request and
+             * keep the wrapper alive so a later call reaches the
+             * recovered backend — mirroring the timeout path. Drop
+             * notifications (no id to answer). 🎯T17. */
+            if (m->kind == MCP_KIND_REQUEST) {
+                d->in_flight--;
+                size_t elen = 0;
+                char *err = mcp_build_error_response(
+                    &m->id, -32003,
+                    "mcpbridge: upstream request failed",
+                    build_backend_data(d),
+                    &elen);
+                if (err != NULL) {
+                    d->sink.send_upstream(d->sink.ctx, err, elen);
+                    free(err);
+                }
+            } else {
+                log_warn("dispatch: dropped %s notification (upstream "
+                         "request failed)",
+                         m->method != NULL ? m->method : "(unknown)");
+            }
+            return;
+        }
         if (rc == DISPATCH_SEND_STALE) {
             /* Session was invalidated mid-flight (e.g. the upstream
              * MCP server restarted and rejected our session id). The
@@ -556,19 +583,25 @@ int dispatch_replay_initialize(struct dispatch *d) {
     int rc = send_raw_with_newline(&d->sink, 1 /* to_child */,
                                    d->cached_init_req,
                                    d->cached_init_req_len);
-    if (rc == DISPATCH_SEND_TIMEOUT) {
-        /* The upstream did not return within the per-call timeout
-         * even for the initialize handshake. Abort the recovery:
-         * synthesise a structured error for every queued upstream
-         * request (the calls that were waiting on this recovery)
-         * and let the caller transition the FSM back to RUNNING.
-         * The wrapper stays alive; the next agent request triggers
-         * a fresh recovery cycle. 🎯T7.1. */
-        log_warn("dispatch: replay initialize timed out; "
+    if (rc == DISPATCH_SEND_TIMEOUT || rc == DISPATCH_SEND_UPSTREAM_ERROR) {
+        /* The re-initialize handshake itself failed: either the
+         * upstream stayed unreachable past the per-call timeout
+         * (🎯T7.1) or the backend returned a per-request failure such
+         * as a 5xx / truncated body (🎯T17). Either way the transport
+         * survives, so abort the recovery cleanly: synthesise a
+         * structured error for every queued upstream request (the
+         * calls waiting on this recovery) and let the caller drive the
+         * FSM back to RUNNING. The wrapper stays alive; the next agent
+         * request triggers a fresh recovery cycle. */
+        int code = (rc == DISPATCH_SEND_TIMEOUT) ? -32001 : -32003;
+        const char *msg = (rc == DISPATCH_SEND_TIMEOUT)
+            ? "mcpbridge: upstream unreachable past timeout during reinit"
+            : "mcpbridge: upstream request failed during reinit";
+        log_warn("dispatch: replay initialize failed (%s); "
                  "draining %s queue with errors",
+                 rc == DISPATCH_SEND_TIMEOUT ? "timeout" : "upstream error",
                  d->queue_head != NULL ? "non-empty" : "empty");
-        drain_queue_with_error(d, -32001,
-            "mcpbridge: upstream unreachable past timeout during reinit");
+        drain_queue_with_error(d, code, msg);
         /* No bytes landed, so no response is coming — don't leave
          * replay_pending set; don't bump in_flight. */
         return -1;
