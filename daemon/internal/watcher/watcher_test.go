@@ -6,6 +6,7 @@ package watcher
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -277,5 +278,97 @@ func TestWatcher_SharedNameDeregisterKeepsLiveWatch(t *testing.T) {
 	if bc.count.Load() != prev {
 		t.Errorf("after the last deregister the watch should be gone: %d -> %d",
 			prev, bc.count.Load())
+	}
+}
+
+// buildHelperBinary compiles a do-nothing executable into dir and
+// returns its path. It must be a real compiled binary: the event under
+// test is the one the kernel emits when a binary is exec'd, and a copy
+// of a system binary (/bin/echo) is refused by macOS code signing
+// while a shell script may not produce the event at all — either would
+// make the regression pass vacuously.
+func buildHelperBinary(t *testing.T, dir string) string {
+	t.Helper()
+	src := filepath.Join(t.TempDir(), "main.go")
+	const prog = "package main\n\nfunc main() {}\n"
+	if err := os.WriteFile(src, []byte(prog), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "runme")
+	cmd := exec.Command("go", "build", "-o", out, src)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("cannot build helper binary (%v): %s", err, b)
+	}
+	return out
+}
+
+// Regression for the self-feeding reload loop (🎯T20).
+//
+// On macOS, kqueue reports NOTE_ATTRIB when a binary is *executed*,
+// and fsnotify surfaces that as Chmod. While Chmod counted as a
+// change, every reload fed the next one: the reload re-exec'd the
+// binary in each of N wrappers, each exec fired Chmod, and the next
+// reload was scheduled one coalesce window later — observed in the
+// field at ~3 reloads/second, indefinitely, for a binary that had not
+// been touched in a day.
+func TestWatcher_ExecutingBinaryDoesNotFireReload(t *testing.T) {
+	dir := shortTempDir(t)
+	binPath := buildHelperBinary(t, dir)
+
+	bc := &fakeBcast{}
+	w, _ := startWatcher(t, bc)
+	if err := w.Track(1, "runme", binPath); err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+
+	for i := 0; i < 5; i++ {
+		if err := exec.Command(binPath, "hello").Run(); err != nil {
+			t.Fatalf("exec %d: %v", i, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// Well past the (shortened) coalesce window.
+	time.Sleep(300 * time.Millisecond)
+
+	if got := bc.count.Load(); got != 0 {
+		t.Fatalf("executing a watched binary fired %d reload(s); want 0", got)
+	}
+}
+
+// The other half of 🎯T20: a reload requires evidence of change,
+// whatever the event source. Exercised directly so the assertion does
+// not depend on which events a platform happens to deliver.
+func TestWatcher_ChangeDetectionRequiresRealChange(t *testing.T) {
+	dir := shortTempDir(t)
+	binPath := filepath.Join(dir, "foo")
+	if err := os.WriteFile(binPath, []byte("v1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	w, _ := startWatcher(t, &fakeBcast{})
+	if err := w.Track(1, "foo", binPath); err != nil {
+		t.Fatalf("Track: %v", err)
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.changedLocked(binPath) {
+		t.Error("untouched file reported as changed")
+	}
+	if err := os.Chmod(binPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if w.changedLocked(binPath) {
+		t.Error("permission change reported as a content change")
+	}
+	if err := os.WriteFile(binPath, []byte("v2 (brew upgrade)"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !w.changedLocked(binPath) {
+		t.Error("rewritten file reported as unchanged")
+	}
+	if w.changedLocked(binPath) {
+		t.Error("second look at the same revision reported as changed")
 	}
 }
