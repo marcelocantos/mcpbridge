@@ -4,7 +4,7 @@ mcpbridge is a pre-1.0 project. This document tracks the public
 interaction surface and what still needs to settle before a 1.0
 release.
 
-Snapshot as of: **v0.7.0**.
+Snapshot as of: **v0.9.0**.
 
 ## Stability commitment
 
@@ -186,6 +186,11 @@ JSON-RPC error codes emitted by the wrapper:
 - **`-32002`** — upstream session reset during a side-effecting
   call, with message `"mcpbridge: upstream session reset during
   call; please retry"`. Added in v0.7.0. **stable**.
+- **`-32003`** — the backend was cycled while the request was still
+  outstanding against it, with message `"mcpbridge: backend cycled
+  during call; please retry"`. Emitted for every request the old
+  backend still owed an answer for at the moment it went away, each
+  addressed to its own `id`. Added in v0.9.0. **stable**.
 
 Operator-visible cycle-window log markers (paired, autonomous
 cycles only):
@@ -206,6 +211,7 @@ contract here so consumers can rely on it without reading the source.
 | Standalone-mode startup | Daemon socket absent at wrapper startup | wrapper logs `daemon unreachable at <sock>; continuing without it`, brings up the agent's stdio session, and forwards messages normally. Reconnect timer arms. **stable**. |
 | Daemon disconnect tolerance | Daemon socket closes mid-session (clean shutdown, crash, SIGTERM, brew restart) | wrapper logs `daemon socket closed`, frees the daemon client, arms the reconnect timer. The agent's stdio session is unaffected — message forwarding continues. The wrapper does **not** exit. **stable**. |
 | Daemon reconnect with backoff | Daemon socket is unavailable | wrapper retries the connect with capped exponential backoff: 1s → 2s → 4s → 5s (`BACKOFF_INITIAL_MS=1000`, `BACKOFF_MAX_MS=5000`). Each successful reconnect re-runs the full `hello` + `register` handshake, so the daemon learns about the wrapper's child-pid and config-name from scratch. **stable**. |
+| Backend cycled with a request still outstanding | The drain ends via child exit rather than in-flight-zero — the backend died or was replaced while it still owed an answer | wrapper answers every outstanding request with a **`-32003`** JSON-RPC error carrying that request's own `id`, and resets its in-flight bookkeeping. Without the reset, the count never returns to zero and every *later* reload parks the wrapper in DRAINING permanently, queueing all subsequent requests — a session that is dead until the agent restarts. Added in v0.9.0. Verified by `tests/e2e_child_death_inflight_test.sh`. **stable**. |
 | In-progress reload across daemon restart | Daemon dies after broadcasting `reload` but before the wrapper sends `reload_ack` | wrapper completes the reload cycle locally (DRAINING → SWAPPING → STARTING → RUNNING). The `reload_ack` send fails and is logged as a warn; the agent's session has already migrated to the new child. The next reconnect re-registers the wrapper from scratch. **stable**. |
 
 The wrapper exits only on: stdin EOF, SIGINT, SIGTERM, or an FSM

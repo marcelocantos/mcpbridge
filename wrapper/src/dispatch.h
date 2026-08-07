@@ -122,6 +122,26 @@ void dispatch_on_state_change(struct dispatch *d, enum fsm_state new_state);
  *      cached session id as gone (which it already is). */
 int dispatch_replay_initialize(struct dispatch *d);
 
+/* Answer every request that was forwarded to a backend which is now
+ * gone, with a JSON-RPC error carrying that request's id, and reset
+ * the in-flight bookkeeping (🎯T21).
+ *
+ * The event loop calls this whenever the backend is about to be
+ * replaced. Two things go wrong without it, and the second is worse:
+ *
+ *   1. The agent waits forever for a response no one will ever send,
+ *      because the process that owed it the answer is gone.
+ *   2. The in-flight count never returns to zero, so every LATER
+ *      reload parks the FSM in DRAINING permanently — IN_FLIGHT_ZERO
+ *      can no longer be reached — and every subsequent request is
+ *      queued behind it. The whole session is dead until the agent
+ *      restarts, which is exactly the failure this wrapper exists to
+ *      prevent.
+ *
+ * reason may be NULL for a sensible default. Safe to call when
+ * nothing is in flight (it does nothing). */
+void dispatch_settle_in_flight(struct dispatch *d, const char *reason);
+
 /* Current in-flight request count, for tests and observability. */
 int dispatch_in_flight(const struct dispatch *d);
 

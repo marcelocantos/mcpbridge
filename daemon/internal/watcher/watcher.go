@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -44,9 +45,22 @@ type watchEntry struct {
 	dir  string // parent dir (what fsnotify actually watches)
 }
 
+// fileSig identifies which revision of a binary is on disk. Two equal
+// signatures mean the file a wrapper would exec now is the file it is
+// already running, so there is nothing to cycle to.
+//
+// Size and mtime are deliberately enough: an upgrade replaces the
+// binary (new content, new mtime) or repoints a symlink at a different
+// Cellar path, and os.Stat follows the symlink. Hashing would be
+// stronger and much more expensive for no case that occurs in practice.
+type fileSig struct {
+	size  int64
+	mtime time.Time
+}
+
 // Watcher tracks a set of per-connection (name, absolutePath)
 // registrations and broadcasts a reload to the matching name(s) when a
-// watched path changes.
+// watched path's contents change.
 type Watcher struct {
 	fs       *fsnotify.Watcher
 	bcast    Broadcaster
@@ -55,6 +69,7 @@ type Watcher struct {
 	mu     sync.Mutex
 	byConn map[uint64]watchEntry // connection id -> what it registered
 	dirs   map[string]int        // parent dir -> refcount (one per live registration)
+	sigs   map[string]fileSig    // watched path -> signature as of the last reload decision
 
 	// pending coalesces rapid event bursts per name (reload is
 	// name-targeted, so the debounce timer stays name-keyed).
@@ -75,6 +90,7 @@ func New(bcast Broadcaster) (*Watcher, error) {
 		coalesce: DefaultCoalesceWindow,
 		byConn:   make(map[uint64]watchEntry),
 		dirs:     make(map[string]int),
+		sigs:     make(map[string]fileSig),
 		pending:  make(map[string]*time.Timer),
 	}, nil
 }
@@ -197,6 +213,13 @@ func (w *Watcher) Track(connID uint64, name, path string) error {
 	}
 	w.dirs[dir]++
 	w.byConn[connID] = watchEntry{name: name, abs: abs, dir: dir}
+	// Baseline the file as it is now, so the first event can be judged
+	// against the revision the wrapper actually launched.
+	if _, known := w.sigs[abs]; !known {
+		if sig, err := statSig(abs); err == nil {
+			w.sigs[abs] = sig
+		}
+	}
 	return nil
 }
 
@@ -218,6 +241,18 @@ func (w *Watcher) removeConnLocked(connID uint64) {
 		return
 	}
 	delete(w.byConn, connID)
+
+	// Drop the signature baseline once nothing watches this path.
+	stillWatched := false
+	for _, other := range w.byConn {
+		if other.abs == e.abs {
+			stillWatched = true
+			break
+		}
+	}
+	if !stillWatched {
+		delete(w.sigs, e.abs)
+	}
 
 	w.dirs[e.dir]--
 	if w.dirs[e.dir] <= 0 {
@@ -253,7 +288,15 @@ func (w *Watcher) handleEvent(ev fsnotify.Event) {
 	// Event names are absolute or dir-relative depending on
 	// platform quirks. fsnotify gives us the full path via Name
 	// in practice (matches the path we Add'd).
-	if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Chmod) == 0 {
+	//
+	// Chmod is deliberately absent. On macOS, kqueue reports
+	// NOTE_ATTRIB — which fsnotify surfaces as Chmod — when a binary
+	// is merely *executed*. Treating that as an upgrade made the
+	// watcher self-feeding: a reload re-execs the binary in every
+	// wrapper, each exec fires Chmod, and the next reload is
+	// scheduled one coalesce window later, forever. An attribute
+	// change is not a new binary.
+	if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
 		return
 	}
 	w.mu.Lock()
@@ -265,11 +308,46 @@ func (w *Watcher) handleEvent(ev fsnotify.Event) {
 			names = append(names, e.name)
 		}
 	}
+	// Whatever the event source, a reload requires evidence that the
+	// file actually changed, so the daemon can never claim "binary
+	// changed" about a file it has not compared.
+	changed := len(names) > 0 && w.changedLocked(ev.Name)
 	coalesce := w.coalesce
 	w.mu.Unlock()
+	if !changed {
+		return
+	}
 	for _, name := range names {
 		w.scheduleReload(name, coalesce)
 	}
+}
+
+// changedLocked reports whether path's signature differs from the one
+// recorded at the last reload decision, updating the record. Caller
+// holds w.mu.
+func (w *Watcher) changedLocked(path string) bool {
+	cur, err := statSig(path)
+	if err != nil {
+		// Mid-replacement (brew unlinks before relinking) or gone.
+		// Treat as changed and leave the old baseline in place: a
+		// spurious reload is cheap, a missed upgrade is not.
+		return true
+	}
+	if prev, ok := w.sigs[path]; ok && prev == cur {
+		return false
+	}
+	w.sigs[path] = cur
+	return true
+}
+
+func statSig(path string) (fileSig, error) {
+	// Stat, not Lstat: a Homebrew upgrade repoints bin/<name> at a new
+	// Cellar path, and it is the target's revision that matters.
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fileSig{}, err
+	}
+	return fileSig{size: fi.Size(), mtime: fi.ModTime()}, nil
 }
 
 func (w *Watcher) scheduleReload(name string, coalesce time.Duration) {

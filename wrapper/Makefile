@@ -137,6 +137,10 @@ test: $(TEST_BINS) $(BIN) $(TEST_HELPERS)
 	@./tests/e2e_wrapper_test.sh
 	@echo "==> tests/e2e_reload_test.sh"
 	@./tests/e2e_reload_test.sh
+	@echo "==> tests/e2e_reload_inflight_test.sh"
+	@./tests/e2e_reload_inflight_test.sh
+	@echo "==> tests/e2e_child_death_inflight_test.sh"
+	@./tests/e2e_child_death_inflight_test.sh
 	@echo "==> tests/e2e_http_reload_test.sh"
 	@./tests/e2e_http_reload_test.sh
 	@echo "==> tests/e2e_http_session_invalid_test.sh"
