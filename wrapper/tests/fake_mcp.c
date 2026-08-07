@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Write one line to stdout, terminated with '\n', and flush. */
@@ -90,7 +91,27 @@ static cJSON *handle_tools_list(const cJSON *id) {
     return make_response(id, result);
 }
 
+/* FAKE_MCP_CALL_DELAY_MS makes tools/call take a while, so a test can
+ * land a reload while a request is genuinely in flight. Blocking the
+ * read loop is the point: a real single-threaded MCP server busy in a
+ * tool call is not reading stdin either. */
+static void delay_if_asked(void) {
+    const char *ms = getenv("FAKE_MCP_CALL_DELAY_MS");
+    if (ms == NULL) {
+        return;
+    }
+    long v = strtol(ms, NULL, 10);
+    if (v <= 0) {
+        return;
+    }
+    struct timespec ts;
+    ts.tv_sec  = v / 1000;
+    ts.tv_nsec = (v % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
 static cJSON *handle_tools_call(const cJSON *id) {
+    delay_if_asked();
     cJSON *result = cJSON_CreateObject();
     cJSON *content = cJSON_CreateArray();
     cJSON *chunk = cJSON_CreateObject();

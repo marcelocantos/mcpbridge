@@ -440,6 +440,17 @@ static void daemon_disconnect(struct loop_ctx *c) {
  * a new one, emits TRANSPORT_STARTED, then asks dispatch to replay
  * the cached initialize. Returns 0 on success, -1 on fatal failure. */
 static int perform_swap(struct loop_ctx *c) {
+    /* Anything still outstanding belongs to the backend we are about
+     * to discard, so no response for it can ever arrive. Answer each
+     * one now (🎯T21). A normal drain leaves nothing here; this fires
+     * when the drain was cut short — the child exited on its own, or
+     * died mid-call — which is precisely when the agent would
+     * otherwise wait forever and the in-flight count would stick
+     * above zero and wedge every later reload. */
+    dispatch_settle_in_flight(c->dispatch,
+                              "mcpbridge: backend cycled during call; "
+                              "please retry");
+
     log_info("swap: stopping old child");
     transport_stop(c->transport);
 

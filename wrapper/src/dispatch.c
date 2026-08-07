@@ -21,10 +21,23 @@ struct queued_msg {
     size_t             len;
 };
 
+/* One request forwarded to the child and not yet answered. We keep
+ * the id, not just a count, because a backend that goes away owes the
+ * agent a response for each of these and we cannot write one without
+ * knowing which id to address it to (🎯T21). */
+struct inflight_req {
+    struct inflight_req *next;
+    struct mcp_id        id;
+};
+
 struct dispatch {
     struct fsm          *fsm;
     struct dispatch_sink sink;
 
+    /* Head of the outstanding-request list; in_flight is its length,
+     * kept in step so the hot path stays a plain int compare. */
+    struct inflight_req *inflight_head;
+    struct inflight_req *inflight_tail;
     int in_flight;
     int initialized;        /* 1 once we've seen an initialize response */
     int replay_pending;     /* 1 while we're waiting for the response to
@@ -109,6 +122,78 @@ static void queued_msg_free(struct queued_msg *q) {
     free(q);
 }
 
+/* ---------- In-flight request tracking ---------- */
+
+/* Deep-copy an id into freshly owned storage. */
+static void id_copy(struct mcp_id *dst, const struct mcp_id *src) {
+    dst->tag = src->tag;
+    if (src->tag == MCP_ID_STRING && src->v.s != NULL) {
+        dst->v.s = xstrdup(src->v.s);
+    } else {
+        dst->v = src->v;
+    }
+}
+
+static void inflight_push(struct dispatch *d, const struct mcp_id *id) {
+    struct inflight_req *r = xcalloc(1, sizeof(*r));
+    id_copy(&r->id, id);
+    if (d->inflight_tail == NULL) {
+        d->inflight_head = r;
+    } else {
+        d->inflight_tail->next = r;
+    }
+    d->inflight_tail = r;
+    d->in_flight++;
+}
+
+static void inflight_req_free(struct inflight_req *r) {
+    if (r == NULL) {
+        return;
+    }
+    mcp_id_free(&r->id);
+    free(r);
+}
+
+/* Drop the entry matching id, if present. Returns 1 if one was
+ * removed. An unmatched response is not an error — the child may
+ * answer something we never counted (notably the replayed
+ * initialize) — so the caller keeps its old floor-at-zero behaviour
+ * for the count. */
+static int inflight_remove(struct dispatch *d, const struct mcp_id *id) {
+    struct inflight_req *prev = NULL;
+    for (struct inflight_req *r = d->inflight_head; r != NULL; r = r->next) {
+        if (mcp_id_eq(&r->id, id)) {
+            if (prev == NULL) {
+                d->inflight_head = r->next;
+            } else {
+                prev->next = r->next;
+            }
+            if (d->inflight_tail == r) {
+                d->inflight_tail = prev;
+            }
+            inflight_req_free(r);
+            if (d->in_flight > 0) {
+                d->in_flight--;
+            }
+            return 1;
+        }
+        prev = r;
+    }
+    return 0;
+}
+
+static void inflight_clear(struct dispatch *d) {
+    struct inflight_req *r = d->inflight_head;
+    while (r != NULL) {
+        struct inflight_req *next = r->next;
+        inflight_req_free(r);
+        r = next;
+    }
+    d->inflight_head = NULL;
+    d->inflight_tail = NULL;
+    d->in_flight = 0;
+}
+
 struct dispatch *dispatch_new(struct fsm *fsm,
                               const struct dispatch_sink *sink) {
     if (fsm == NULL || sink == NULL ||
@@ -133,6 +218,7 @@ void dispatch_free(struct dispatch *d) {
         queued_msg_free(q);
         q = next;
     }
+    inflight_clear(d);
     free(d->cached_init_req);
     free(d->cached_initialized_notif);
     free(d);
@@ -288,7 +374,7 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
         /* Forward immediately. Count requests (messages that expect
          * a response) so we can track in-flight for drain. */
         if (m->kind == MCP_KIND_REQUEST) {
-            d->in_flight++;
+            inflight_push(d, &m->id);
         }
         int rc = send_raw_with_newline(&d->sink, 1 /* to_child */,
                                        m->raw, m->raw_len);
@@ -301,7 +387,7 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
              * (🎯T7.1). Notifications have no id; we just drop them
              * and log. */
             if (m->kind == MCP_KIND_REQUEST) {
-                d->in_flight--;
+                inflight_remove(d, &m->id);
                 size_t elen = 0;
                 char *err = mcp_build_error_response(
                     &m->id, -32001,
@@ -366,7 +452,7 @@ void dispatch_on_upstream(struct dispatch *d, const struct mcp_msg *m) {
              * violates the agent's expectation of at-most-once
              * delivery for tool calls. */
             if (m->kind == MCP_KIND_REQUEST) {
-                d->in_flight--;
+                inflight_remove(d, &m->id);
             }
             int replay = (m->kind == MCP_KIND_NOTIFICATION)
                       || is_replay_safe_method(m->method);
@@ -488,12 +574,49 @@ void dispatch_on_child(struct dispatch *d, const struct mcp_msg *m) {
     send_raw_with_newline(&d->sink, 0, m->raw, m->raw_len);
 
     if (m->kind == MCP_KIND_RESPONSE) {
-        if (d->in_flight > 0) {
+        if (!inflight_remove(d, &m->id) && d->in_flight > 0) {
+            /* A response we never counted (e.g. a request forwarded
+             * from the queue before id tracking existed for it).
+             * Preserve the historical floor-at-zero behaviour. */
             d->in_flight--;
         }
         if (d->in_flight == 0 && d->fsm->state == FSM_DRAINING) {
             d->sink.emit_event(d->sink.ctx, FSM_EV_IN_FLIGHT_ZERO);
         }
+    }
+}
+
+void dispatch_settle_in_flight(struct dispatch *d, const char *reason) {
+    if (d == NULL) {
+        return;
+    }
+    int n = 0;
+    for (struct inflight_req *r = d->inflight_head; r != NULL; r = r->next) {
+        n++;
+        size_t elen = 0;
+        char *err = mcp_build_error_response(
+            &r->id, -32003,
+            reason != NULL ? reason
+                           : "mcpbridge: backend cycled during call; "
+                             "please retry",
+            build_backend_data(d),
+            &elen);
+        if (err != NULL) {
+            d->sink.send_upstream(d->sink.ctx, err, elen);
+            free(err);
+        }
+    }
+    /* Clears the list AND zeroes the count. Zeroing matters even when
+     * the list is empty: the replayed initialize is counted without a
+     * list entry (it is the wrapper's own request, not the agent's),
+     * so a swap landing while one is outstanding would otherwise leave
+     * in_flight stuck at 1 with nothing left to decrement it — the
+     * same wedge by another route. */
+    inflight_clear(d);
+    d->replay_pending = 0;
+    if (n > 0) {
+        log_info("dispatch: answered %d abandoned request(s) with an "
+                 "error so the agent is not left waiting", n);
     }
 }
 

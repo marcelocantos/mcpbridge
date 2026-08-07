@@ -833,6 +833,85 @@ static void test_replay_noop_without_cache(void) {
     dispatch_free(d);
 }
 
+/* 🎯T21. Requests outstanding against a backend that is going away
+ * must be answered, addressed to their own ids, and the in-flight
+ * bookkeeping must return to zero — otherwise the next drain waits
+ * on a count that can never reach zero and the session is dead. */
+static void test_settle_answers_abandoned_requests(void) {
+    struct fsm f;
+    fsm_to_running(&f);
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+    CHECK(d != NULL, "dispatch_new");
+
+    /* Two outstanding requests: one integer id, one string id. */
+    struct mcp_msg r1 = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"slow\"}}");
+    struct mcp_msg r2 = parse_or_die(
+        "{\"jsonrpc\":\"2.0\",\"id\":\"abc\",\"method\":\"tools/list\"}");
+    dispatch_on_upstream(d, &r1);
+    dispatch_on_upstream(d, &r2);
+    CHECK(dispatch_in_flight(d) == 2, "two requests in flight");
+
+    sink_state.up_len = 0;
+    dispatch_settle_in_flight(d, "mcpbridge: backend cycled during call");
+
+    CHECK(dispatch_in_flight(d) == 0,
+          "in_flight reset to zero after settling");
+    CHECK(strstr(sink_state.up_buf, "\"id\":11") != NULL,
+          "error response addressed to the integer id");
+    CHECK(strstr(sink_state.up_buf, "\"id\":\"abc\"") != NULL,
+          "error response addressed to the string id");
+    CHECK(strstr(sink_state.up_buf, "\"error\"") != NULL,
+          "responses are JSON-RPC errors");
+
+    /* The whole point: a subsequent drain must be able to finish. */
+    sink_state.event_count = 0;
+    fsm_step(&f, FSM_EV_RELOAD_REQUESTED);
+    dispatch_on_state_change(d, f.state);
+    int saw_zero = 0;
+    for (int i = 0; i < sink_state.event_count; i++) {
+        if (sink_state.events[i] == FSM_EV_IN_FLIGHT_ZERO) {
+            saw_zero = 1;
+        }
+    }
+    CHECK(saw_zero, "a later drain reaches IN_FLIGHT_ZERO");
+
+    mcp_msg_free(&r1);
+    mcp_msg_free(&r2);
+    dispatch_free(d);
+}
+
+/* Settling with nothing outstanding must be silent and harmless —
+ * it runs on every swap, including the orderly ones. */
+static void test_settle_noop_when_idle(void) {
+    struct fsm f;
+    fsm_to_running(&f);
+
+    struct fake_sink_state sink_state = {0};
+    struct dispatch_sink sink = {
+        .send_upstream = fake_send_upstream,
+        .send_child    = fake_send_child,
+        .emit_event    = fake_emit_event,
+        .ctx           = &sink_state,
+    };
+    struct dispatch *d = dispatch_new(&f, &sink);
+
+    dispatch_settle_in_flight(d, NULL);
+    CHECK(sink_state.up_len == 0, "no bytes sent upstream when idle");
+    CHECK(dispatch_in_flight(d) == 0, "in_flight still zero");
+
+    dispatch_free(d);
+}
+
 int main(void) {
     test_round_trip_running();
     test_queue_while_starting_drain_on_running();
@@ -849,6 +928,8 @@ int main(void) {
     test_stale_send_surfaces_error_for_side_effecting();
     test_upstream_error_surfaces_error_and_survives();
     test_replay_noop_without_cache();
+    test_settle_answers_abandoned_requests();
+    test_settle_noop_when_idle();
 
     if (fail_count > 0) {
         fprintf(stderr, "%d dispatch_test assertion(s) failed\n", fail_count);

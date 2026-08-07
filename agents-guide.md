@@ -315,6 +315,21 @@ If `config_found=true` but reloads still don't arrive, confirm
 that `child_binary` on register points at the real binary that
 gets replaced on upgrade — the daemon watches that exact path.
 
+**A tool call came back with error -32003 "backend cycled during
+call".** The backend was replaced while that call was still
+outstanding, so no answer to it was ever going to arrive. The
+wrapper answers such calls itself rather than letting the agent
+wait forever. Retry the call: the session is live and the next
+request lands on the new backend.
+
+This matters more than it looks. mcpbridge's whole promise is that
+the agent never observes a backend cycle, and an unanswered request
+would break it twice over — the agent waits on a response nobody
+will send, and the wrapper's in-flight count never returns to zero,
+so the *next* reload parks it in DRAINING forever and every later
+request queues behind it. A `-32003` you can retry is the wrapper
+refusing to let that happen.
+
 **The agent sees an initialize failure after a reload.** The
 wrapped server is broken in a way that the daemon-driven upgrade
 exposed — it isn't mcpbridge's fault. Check the wrapped server's
