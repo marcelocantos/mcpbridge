@@ -4,7 +4,7 @@ mcpbridge is a pre-1.0 project. This document tracks the public
 interaction surface and what still needs to settle before a 1.0
 release.
 
-Snapshot as of: **v0.7.0**.
+Snapshot as of: **v0.9.0**.
 
 ## Stability commitment
 
