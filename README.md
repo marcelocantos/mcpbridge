@@ -109,11 +109,11 @@ There are two restart paths, both invisible to the agent:
 - **Autonomous self-reload.** When the upstream restarts on its own
   (a manual `brew services restart`, a crash, an HTTP server cycling)
   it forgets the wrapper's session id. The next request comes back as
-  `400 Bad Request: Invalid session ID`. mcpbridge detects this,
-  re-runs the cached handshake against the upstream (capturing a
-  fresh session id), and replays the in-flight request that triggered
-  the failure. The agent sees one extra round-trip of latency on that
-  call and nothing else.
+  `400 Bad Request: Invalid session ID`. mcpbridge detects this and
+  re-runs the cached handshake against the upstream. Idempotent
+  reads are replayed under the new session; side-effecting calls
+  (`tools/call`, `sampling/createMessage`) get a structured JSON-RPC
+  error (`code: -32002`, retryable) rather than a silent re-issue.
 
 Both paths emit `notifications/tools/list_changed`,
 `prompts/list_changed`, and `resources/list_changed` to the agent

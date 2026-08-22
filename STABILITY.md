@@ -65,12 +65,12 @@ Environment:
 - `MCPBRIDGE_SOCKET` — overrides the UDS path. **stable**.
 - `MCPBRIDGE_CONFIG_DIR` — overrides the config search path
   (primarily used by tests). **stable**.
-- `MCPBRIDGE_BREW_PATH` — explicit path to the `brew` executable
-  for the brew source backend. If unset, the daemon resolves via
-  `$PATH`, then falls back to known install locations
-  (`/opt/homebrew/bin/brew`, `/usr/local/bin/brew`,
-  `/home/linuxbrew/.linuxbrew/bin/brew`). Added in v0.3.0.
-  **stable**.
+
+The daemon watches each registered wrapper's `child_binary` via
+fsnotify and broadcasts a targeted `reload` when the file changes
+on disk. Upgrades are out of band (`brew upgrade`, manual
+install); the daemon does not poll, download, or install. SIGHUP
+broadcasts a manual reload to every currently registered wrapper.
 
 ### Socket path resolution
 
@@ -104,21 +104,24 @@ Message types (all **stable** for v1):
 | `hello` | wrapper → daemon | first message, wrapper version + pid |
 | `hello_ok` | daemon → wrapper | ack + daemon version |
 | `register` | wrapper → daemon | name + child_pid + child_binary |
-| `register_ok` | daemon → wrapper | config_found + polling |
+| `register_ok` | daemon → wrapper | config_found + polling (polling is vestigial and always `false`) |
 | `deregister` | wrapper → daemon | clean disconnect |
 | `reload` | daemon → wrapper | name + old_version + new_version + reason |
 | `reload_ack` | wrapper → daemon | ack_seq + status (ok/drain_timeout/spawn_failed/init_failed) + detail |
 | `shutdown` | daemon → wrapper | advisory "daemon going down" |
 | `error` | either | code + detail, closes the connection |
 
-Known `reason` strings on `reload`:
+Known `reason` strings on `reload` from current daemons:
 - `manual` (SIGHUP)
-- `brew_upgrade`
-- `github_release`
 - `binary_changed` (fsnotify)
 
+`reason` is advisory; the wrapper logs it and does not branch on
+it. Older (pre-v0.8.0) daemons may emit `brew_upgrade` or
+`github_release`; wrappers ignore the value.
+
 Known `status` values on `reload_ack`: `ok`, `drain_timeout`,
-`spawn_failed`, `init_failed`.
+`spawn_failed`, `init_failed`. The daemon logs non-`ok` statuses
+and does not change watcher behaviour.
 
 **stable** — this is what 1.0 will commit to if shipped today.
 
@@ -134,19 +137,14 @@ Envelope fields:
 | `name` | string | yes | — | **stable** — identifier the wrapper sends to the daemon on registration; the file path is no longer constrained to match. |
 | `command` | string | one of `command`/`url` | — | **stable** — stdio backend; tilde-expanded at parse time. |
 | `args` | array of string | no | `[]` | **stable** — passed verbatim to `execvp`; no shell expansion. |
-| `url` | string | one of `command`/`url` | — | **stable** — plain `http://` loopback URLs only in v1 of the HTTP backend (`localhost` / `127.0.0.1` / `::1`); `https://` and remote hosts rejected. |
-| `source` | object | yes | — | **stable** (see per-type below) |
-| `upgrade` | `off`\|`notify`\|`auto` | no | `notify` | **stable** |
-| `check_interval` | Go duration | no | `1h` | **stable** |
-| `tool_call_timeout_ms` | int (≥0) | no | `300000` | **stable** — added in v0.6.0. Bounds how long any single tool call may wait for the upstream when the HTTP backend is in retry. `0` disables the bound (retry until the agent or some outer timeout intervenes). Idle wrapper does no upstream I/O regardless of value. |
+| `url` | string | one of `command`/`url` | — | **stable** — plain `http://` loopback URLs only in v1 of the HTTP backend (`localhost` / `127.0.0.1`); `https://` and remote hosts rejected. The schema also names `::1`; the C wrapper currently rejects IPv6 URL forms (it splits the host at the first `:`). |
+| `tool_call_timeout_ms` | int (≥0) | no | `300000` | **stable** — added in v0.6.0. Wrapper-only: the C parser reads it; the daemon ignores unknown JSON keys. Bounds how long any single tool call may wait for the upstream when the HTTP backend is in retry. `0` disables the bound (retry until the agent or some outer timeout intervenes). Idle wrapper does no upstream I/O regardless of value. |
 
-Source `brew`:
-- `type: "brew"`, `formula: "<string>"` — **stable**
-
-Source `github`:
-- `type: "github"`, `repo: "owner/name"` — **stable**
-- `asset`, `binary_in_archive`, `checksum_asset` — **stable**
-- Template vars in `asset`: `{version}`, `{tag}`, `{os}`, `{arch}` — **stable**
+Fields `source`, `upgrade`, and `check_interval` were removed in
+v0.8.0 when brew/github polling backends were retired. Both
+parsers ignore unknown JSON fields, so existing files that still
+carry those keys load without error. They are not part of the
+contract.
 
 Config discovery paths:
 1. `$MCPBRIDGE_CONFIG_DIR` (if set; overrides everything)
@@ -171,7 +169,7 @@ Stable contract from v0.6.0 onward; additive changes only.
 
 | Guarantee | Trigger | Behaviour |
 |---|---|---|
-| Daemon-driven reload | `mcpbridge-daemon` broadcasts `reload` (e.g. brew upgrade detected) | wrapper drains in-flight, re-handshakes upstream, replays cached `initialize` + `notifications/initialized`, emits `tools/list_changed` + `prompts/list_changed` + `resources/list_changed` upstream, sends `reload_ack`. Agent sees zero disconnect. **stable**. |
+| Daemon-driven reload | `mcpbridge-daemon` broadcasts `reload` (fsnotify on `child_binary`, e.g. after an out-of-band `brew upgrade`, or SIGHUP) | wrapper drains in-flight, re-handshakes upstream, replays cached `initialize` + `notifications/initialized`, emits `tools/list_changed` + `prompts/list_changed` + `resources/list_changed` upstream, sends `reload_ack`. Agent sees zero disconnect. **stable**. |
 | Autonomous self-reload | Upstream returns 4xx (typically `400 Bad Request: Invalid session ID`) for a request bearing the cached MCP-Session-Id | wrapper detects the stale session, runs the daemon-less equivalent of the reload pathway (re-handshake + replay + list_changed broadcast). Idempotent reads on the replay-safe whitelist (`tools/list`, `prompts/list`, `prompts/get`, `resources/list`, `resources/read`, `resources/templates/list`, `resources/subscribe`, `resources/unsubscribe`, `roots/list`, `ping`, `logging/setLevel`, `completion/complete`, plus `initialize`/`notifications/initialized`) are queued and drained under the new session — agent sees zero error. Side-effecting requests (notably `tools/call` and `sampling/createMessage`) get a structured error per the next row rather than a silent retry. Added in v0.6.0; replay-safety split refined in v0.7.0. **stable**. |
 | Side-effecting call across stale session | Upstream returns 4xx for an in-flight `tools/call` (or any non-whitelisted method) | wrapper synthesises a JSON-RPC error response to the agent (preserving the original `id`) carrying code **`-32002`** with message `"mcpbridge: upstream session reset during call; please retry"`. The reload cycle still runs so subsequent calls land cleanly under the new session. Agents that receive `-32002` may safely retry the call. Added in v0.7.0. **stable**. |
 | Idle outage tolerance | Upstream becomes unreachable while no tool call is in flight | wrapper does no upstream I/O — there is no background pinger and no idle timeout. Outages of arbitrary length pass unobserved. The next tool call after the upstream returns succeeds via autonomous self-reload. Added in v0.6.0. **stable**. |
@@ -214,9 +212,12 @@ contract here so consumers can rely on it without reading the source.
 | Backend cycled with a request still outstanding | The drain ends via child exit rather than in-flight-zero — the backend died or was replaced while it still owed an answer | wrapper answers every outstanding request with a **`-32003`** JSON-RPC error carrying that request's own `id`, and resets its in-flight bookkeeping. Without the reset, the count never returns to zero and every *later* reload parks the wrapper in DRAINING permanently, queueing all subsequent requests — a session that is dead until the agent restarts. Added in v0.9.0. Verified by `tests/e2e_child_death_inflight_test.sh`. **stable**. |
 | In-progress reload across daemon restart | Daemon dies after broadcasting `reload` but before the wrapper sends `reload_ack` | wrapper completes the reload cycle locally (DRAINING → SWAPPING → STARTING → RUNNING). The `reload_ack` send fails and is logged as a warn; the agent's session has already migrated to the new child. The next reconnect re-registers the wrapper from scratch. **stable**. |
 
-The wrapper exits only on: stdin EOF, SIGINT, SIGTERM, or an FSM
-transition to `FAILED`. Daemon socket loss never triggers any of
-these. Verified by `tests/e2e_daemon_outage_test.sh`.
+The wrapper exits on: stdin EOF, SIGINT, SIGTERM, an FSM
+transition to `FAILED`, or unexpected stdio-child death while not
+already draining/swapping (the event loop treats `RUNNING` +
+`CHILD_EXIT` as terminal; the FSM's `RESPAWN` path is not driven).
+Daemon socket loss never triggers any of these. Verified by
+`tests/e2e_daemon_outage_test.sh`.
 
 ### Internal Go API
 
@@ -235,15 +236,11 @@ stability commitment.
 
 These must be addressed before the v1.0.0 release can ship.
 
-1. **Version-derivation for github source baselining.** The
-   scheduler currently caches "whatever GitHub says is latest on
-   the first poll" as the baseline, rather than asking the wrapped
-   binary what version it is. This is safe but means the first
-   poll per config is always a no-op. Before 1.0, pick one of:
-   (a) accept this as intended behaviour and document it more
-   prominently, or (b) add an optional `version_cmd` field to the
-   config so the scheduler can learn the installed version by
-   running a user-supplied command (e.g., `mnemo --version`).
+1. **Resolved as of v0.8.0** — brew/github source backends and the
+   polling scheduler. The daemon watches `child_binary` via
+   fsnotify and does not poll or install. Config fields `source`,
+   `upgrade`, and `check_interval` are ignored. This is no longer
+   a 1.0 prerequisite.
 
 2. **Resolved as of v0.4.0** — config-driven `name`. The wrapper no
    longer infers a name from the launch command; the config file's
@@ -288,15 +285,13 @@ These must be addressed before the v1.0.0 release can ship.
      turns a silent correctness bug into a visible operational
      one.
 
-   - **reload_ack failure statuses acted on.** The `reload_ack`
-     envelope already defines `drain_timeout`, `spawn_failed`,
-     and `init_failed` values alongside `ok`, but nothing in
-     the scheduler currently reacts to them — the daemon logs
-     and continues, and the next poll triggers another upgrade
-     attempt regardless. Before 1.0, the scheduler should
-     treat non-`ok` ack statuses as signal to back off the
-     source for that config (configurable cooldown) and surface
-     a health indicator via a future `status` RPC.
+   - **reload_ack failure statuses.** The `reload_ack` envelope
+     already defines `drain_timeout`, `spawn_failed`, and
+     `init_failed` values alongside `ok`. The daemon logs these
+     and continues; the watcher does not back off. A later
+     `binary_changed` or SIGHUP can start another cycle. Before
+     1.0, decide whether non-`ok` statuses should surface as an
+     operator-visible health signal beyond the daemon log.
 
    - **Eager tools/list diff instead of unconditional emission.**
      v0.2.0's "just emit three notifications" approach is
@@ -310,12 +305,13 @@ These must be addressed before the v1.0.0 release can ship.
    wrapper supports both stdio and HTTP backends (selected per
    config file under v0.4.0's unified `connect <path>` form). The
    HTTP path accepts only plain `http://` to loopback hosts
-   (`localhost` / `127.0.0.1` / `::1`); `https://` and remote hosts
-   are rejected at config-load time. There is no standing GET SSE
-   stream — inbound notifications arrive via POST-response SSE
-   streams. Widening any of these (TLS, remote hosts, standing GET
-   SSE) is additive and can land post-1.0 without breaking
-   existing users.
+   (`localhost` / `127.0.0.1`); `https://` and remote hosts are
+   rejected at config-load time. `::1` is named in the schema; the
+   C wrapper currently rejects IPv6 URL forms. There is no
+   standing GET SSE stream — inbound notifications arrive via
+   POST-response SSE streams. Widening any of these (TLS, remote
+   hosts, IPv6 loopback, standing GET SSE) is additive and can
+   land post-1.0 without breaking existing users.
 
 5. **No GitHub release publishing automation beyond what's
    shipped.** The Homebrew formula publishing is automated via
@@ -339,18 +335,14 @@ These must be addressed before the v1.0.0 release can ship.
 
 ## Out of scope for 1.0
 
-- **HTTPS for github source.** The daemon uses Go's `net/http`
-  which supports HTTPS natively; no TLS work is needed in the
-  current code. Flagging here only to note that we explicitly
-  do not intend to stand up our own TLS stack.
+- **In-daemon installers / polling upgrade backends.** Retired in
+  v0.8.0. The daemon does not download, build, or `brew upgrade`
+  wrapped servers.
 - **Remote HTTP MCP servers over TLS from the wrapper.** The
   HTTP backend is plain-HTTP loopback only. TLS and remote hosts
   are out of scope for 1.0; wrapping a remote MCP server over
   HTTPS is a different product.
 - **Windows.** macOS and Linux only.
-- **`npm` / `pypi` / `go install` source backends.** Deferred
-  indefinitely. The `brew` + `github` backends cover everything
-  we actually ship.
 - **Cross-user daemons.** One daemon per user session. No
   system-wide install.
 - **Re-using the old mcpbridge-as-library shape.** The Go library
