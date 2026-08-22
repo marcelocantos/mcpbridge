@@ -169,7 +169,7 @@ command and nothing is wrapped. This is the step people forget.
 ### Installation is only complete after all four steps
 
 If you stopped at step 2, the daemon is running but wraps nothing.
-If you stopped at step 3, the daemon knows what to poll but no
+If you stopped at step 3, the daemon has loaded configs but no
 wrapper is registered. If you stopped at step 4 without restarting
 the client, the new config isn't live. **Do not report success
 until the client has been restarted and the wrapped server is
