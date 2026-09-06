@@ -68,7 +68,7 @@ jobs:
           STAGE="mcpbridge-${RAW_VERSION}-${{ matrix.target }}"
           mkdir -p "$STAGE"
           cp wrapper/mcpbridge daemon/mcpbridge-daemon "$STAGE/"
-          cp LICENSE NOTICES.md README.md agents-guide.md "$STAGE/" 2>/dev/null || true
+          cp LICENSE NOTICE README.md agents-guide.md "$STAGE/" 2>/dev/null || true
           mkdir -p "$STAGE/docs"
           cp docs/wire-protocol.md docs/config-schema.md docs/packaging.md \
              "$STAGE/docs/" 2>/dev/null || true
