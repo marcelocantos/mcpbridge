@@ -25,6 +25,15 @@ if [ ! -x "$CHILD" ]; then
     exit 1
 fi
 
+# Point the wrapper at a socket path that cannot exist. Without this the
+# wrapper resolves ~/Library/Caches/mcpbridge/daemon.sock and registers
+# with whatever mcpbridge daemon the developer happens to be running,
+# which changes the handshake and fails the test for a reason that has
+# nothing to do with the code under test. The test is a wrapper+child
+# smoke test; no daemon is meant to be involved.
+MCPBRIDGE_SOCKET=/nonexistent/mcpbridge-e2e/daemon.sock
+export MCPBRIDGE_SOCKET
+
 OUT=$(mktemp -t mcpbridge-e2e.XXXXXX)
 ERR=$(mktemp -t mcpbridge-e2e.XXXXXX)
 CFG=$(mktemp -t mcpbridge-e2e.XXXXXX.json)
