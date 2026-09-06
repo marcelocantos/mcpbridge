@@ -6,6 +6,7 @@ name: CI
 on:
   push:
     branches: [master]
+    tags: ['v*']
   pull_request:
     branches: [master]
 
@@ -31,8 +32,8 @@ jobs:
           go version
           uname -a
 
-      - name: Build
-        run: make
-
-      - name: Test
-        run: make test
+      # Same recipe the local pre-push hook runs (scripts/hooks/pre-push),
+      # so CI is a second-platform regression net rather than a different
+      # set of checks.
+      - name: Gate
+        run: make gate

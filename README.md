@@ -167,6 +167,20 @@ make test       # runs both test suites
 Requires a C11 compiler, POSIX.1-2008, and Go 1.24 or later.
 Supported platforms: macOS arm64 and Linux x86_64 / arm64.
 
+## Delivery
+
+Work lands on `master` by a gated push, not a pull request. Once per
+clone:
+
+```sh
+make hooks      # git config core.hooksPath scripts/hooks
+```
+
+`scripts/hooks/pre-push` then runs `make gate` — `go vet`, `gofmt`, the
+C wrapper suite and the `-race` daemon suite — and refuses the push when
+it is red. GitHub Actions runs the same `make gate` on ubuntu and macos
+after the fact, and on inbound pull requests from external contributors.
+
 ## License
 
 Apache 2.0. See `LICENSE`. Vendored third-party code retains its
