@@ -10,6 +10,7 @@
 /wrapper/tests/fake_echo
 /wrapper/tests/fake_mcp
 /wrapper/tests/fake_http_mcp
+/wrapper/bench/bench
 
 # Go build artifacts (daemon)
 /daemon/mcpbridge-daemon

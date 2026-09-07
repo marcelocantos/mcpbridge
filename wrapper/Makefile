@@ -59,7 +59,7 @@ TEST_BINS  = tests/smoke_test tests/mcp_test tests/fsm_test \
              tests/transport_stdio_test tests/transport_http_test \
              tests/dispatch_test tests/daemon_client_test
 
-.PHONY: all test clean install
+.PHONY: all test clean install bench bench-lock bench-gate bench-gate-loose
 
 all: $(BIN)
 
@@ -154,8 +154,43 @@ test: $(TEST_BINS) $(BIN) $(TEST_HELPERS)
 	@echo "==> tests/e2e_daemon_outage_test.sh"
 	@./tests/e2e_daemon_outage_test.sh
 
+# Benchmarks for the per-message path. bench/bench.c is the whole
+# harness — no framework, same as the tests. It measures mcp_msg_parse,
+# which every message an agent sends or receives goes through.
+#
+#   make bench             run them
+#   make bench-lock        make this run the new baseline
+#   make bench-gate        compare against ../docs/perf/baseline.txt
+#   make bench-gate-loose  compare only the counted metrics
+#
+# Timings are only comparable on the machine the baseline was recorded
+# on (docs/perf/baseline.md names it); bench-gate-loose compares just
+# the counted metrics, which are identical everywhere, and is what CI
+# can honestly run.
+BENCH_BIN = bench/bench
+
+bench/bench: bench/bench.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ bench/bench.o \
+	    $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+
+bench/%.o: bench/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+bench: $(BENCH_BIN)
+	@./$(BENCH_BIN)
+
+bench-lock: $(BENCH_BIN)
+	@./$(BENCH_BIN) --lock
+
+bench-gate: $(BENCH_BIN)
+	@./$(BENCH_BIN) --gate
+
+bench-gate-loose: $(BENCH_BIN)
+	@./$(BENCH_BIN) --gate --loose
+
 clean:
 	rm -f $(BIN) $(MAIN_OBJS) $(TEST_BINS) $(TEST_HELPERS) \
+	      $(BENCH_BIN) bench/*.o \
 	      tests/*.o
 
 install: $(BIN)

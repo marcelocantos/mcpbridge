@@ -1,0 +1,7 @@
+# mcpbridge benchmarks — see docs/perf/baseline.md
+Notification	178 ns/op	7 allocs	54 message-bytes
+ToolCallRequest	407 ns/op	19 allocs	116 message-bytes
+ToolResult4KB	2612 ns/op	19 allocs	4188 message-bytes
+ToolResult256KB	140143 ns/op	19 allocs	262236 message-bytes
+Large_JsonParseOnly	136833 ns/op	19 allocs	262236 message-bytes
+Large_RawCopyOnly	3195 ns/op	0 allocs	262236 message-bytes
