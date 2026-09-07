@@ -4,6 +4,7 @@
 #include "transport_http.h"
 
 #include "log.h"
+#include "mcp.h"
 #include "util.h"
 
 #include <arpa/inet.h>
@@ -26,6 +27,21 @@
  * settled — we just send it unconditionally, which the server
  * tolerates on pre-initialize requests too. */
 #define MCP_PROTOCOL_VERSION "2025-11-25"
+
+/* Upper bound on a single response body we will assemble: one SSE
+ * event's data payload, one SSE line, or one plain-JSON body. Set to
+ * the stdio transport's line cap so a message that fits through one
+ * transport fits through the other.
+ *
+ * Exceeding it fails the request with EPROTO. It must never truncate
+ * silently: a truncated response is dropped downstream as unparseable
+ * JSON, and the agent then waits forever for a reply that will never
+ * arrive. A hang is indistinguishable from slow work, which is how
+ * the old fixed 64 KiB buffers hid for so long. */
+#define HTTP_BODY_MAX MCP_LINE_MAX_DEFAULT
+
+/* Starting capacity for the growable SSE buffers. */
+#define HTTP_BODY_INITIAL_CAP 4096u
 
 /* =============================================================
  * URL parsing
@@ -505,17 +521,45 @@ static int chunk_dec_feed(struct chunk_dec *c,
  * ============================================================= */
 
 struct sse_parser {
-    char   data[65536];  /* accumulated data field for the current event */
+    char  *data;      /* accumulated data field for the current event */
     size_t data_len;
-    char   line[65536];  /* current line being accumulated */
+    size_t data_cap;
+    char  *line;      /* current line being accumulated */
     size_t line_len;
-    int    had_line;     /* 1 once we've seen at least one non-empty line */
+    size_t line_cap;
+    int    overflow;  /* 1 once a line or event exceeded HTTP_BODY_MAX */
 };
 
 static void sse_parser_init(struct sse_parser *s) {
-    s->data_len = 0;
-    s->line_len = 0;
-    s->had_line = 0;
+    memset(s, 0, sizeof(*s));
+}
+
+static void sse_parser_free(struct sse_parser *s) {
+    free(s->data);
+    free(s->line);
+    memset(s, 0, sizeof(*s));
+}
+
+/* Grow *buf to hold at least `need` bytes. Returns 0 on success, -1
+ * if `need` exceeds HTTP_BODY_MAX (the caller then fails the
+ * request rather than dropping bytes). */
+static int body_buf_grow(char **buf, size_t *cap, size_t need) {
+    if (need > HTTP_BODY_MAX) {
+        return -1;
+    }
+    if (need <= *cap) {
+        return 0;
+    }
+    size_t new_cap = (*cap == 0) ? HTTP_BODY_INITIAL_CAP : *cap;
+    while (new_cap < need) {
+        new_cap *= 2;
+    }
+    if (new_cap > HTTP_BODY_MAX) {
+        new_cap = HTTP_BODY_MAX;
+    }
+    *buf = xrealloc(*buf, new_cap);
+    *cap = new_cap;
+    return 0;
 }
 
 /* Handle one complete line (the terminating LF has been stripped
@@ -533,10 +577,8 @@ static void sse_handle_line(struct sse_parser *s,
             }
             s->data_len = 0;
         }
-        s->had_line = 0;
         return;
     }
-    s->had_line = 1;
     /* Skip comments (lines starting with ':'). */
     if (line[0] == ':') {
         return;
@@ -568,21 +610,28 @@ static void sse_handle_line(struct sse_parser *s,
          * but the trailing \n after the last data line is NOT kept).
          * We approximate this by prefixing a \n before every data
          * line after the first within the same event. */
-        if (s->data_len > 0) {
-            if (s->data_len + 1 < sizeof(s->data)) {
-                s->data[s->data_len++] = '\n';
-            }
+        size_t sep = (s->data_len > 0) ? 1 : 0;
+        if (body_buf_grow(&s->data, &s->data_cap,
+                          s->data_len + sep + value_len) != 0) {
+            log_error("sse: event data exceeds %u bytes; failing the "
+                      "request", (unsigned)HTTP_BODY_MAX);
+            s->overflow = 1;
+            return;
         }
-        size_t room = sizeof(s->data) - s->data_len;
-        size_t take = value_len < room ? value_len : room;
-        memcpy(s->data + s->data_len, value, take);
-        s->data_len += take;
+        if (sep > 0) {
+            s->data[s->data_len++] = '\n';
+        }
+        memcpy(s->data + s->data_len, value, value_len);
+        s->data_len += value_len;
     }
 }
 
 static void sse_parser_feed(struct sse_parser *s,
                             const char *bytes, size_t n,
                             transport_on_message on_msg, void *ctx) {
+    if (s->overflow) {
+        return; /* already failed; the caller will surface EPROTO */
+    }
     for (size_t i = 0; i < n; i++) {
         char b = bytes[i];
         if (b == '\n') {
@@ -591,18 +640,19 @@ static void sse_parser_feed(struct sse_parser *s,
             if (len > 0 && s->line[len-1] == '\r') {
                 len--;
             }
-            sse_handle_line(s, s->line, len, on_msg, ctx);
+            sse_handle_line(s, s->line == NULL ? "" : s->line, len,
+                            on_msg, ctx);
             s->line_len = 0;
+            if (s->overflow) {
+                return;
+            }
             continue;
         }
-        if (s->line_len + 1 >= sizeof(s->line)) {
-            /* Line too long — drop it by continuing to consume bytes
-             * until the next \n, then resetting. We log once. */
-            if (s->line_len == sizeof(s->line) - 1) {
-                log_warn("sse: dropping oversized line");
-            }
-            s->line_len = sizeof(s->line) - 1;
-            continue;
+        if (body_buf_grow(&s->line, &s->line_cap, s->line_len + 1) != 0) {
+            log_error("sse: line exceeds %u bytes; failing the request",
+                      (unsigned)HTTP_BODY_MAX);
+            s->overflow = 1;
+            return;
         }
         s->line[s->line_len++] = b;
     }
@@ -715,6 +765,7 @@ struct body_ctx {
     char              *json_buf;
     size_t             json_len;
     size_t             json_cap;
+    int                json_overflow;  /* body exceeded HTTP_BODY_MAX */
 };
 
 static void body_accept(void *vctx, const char *bytes, size_t n) {
@@ -724,11 +775,14 @@ static void body_accept(void *vctx, const char *bytes, size_t n) {
         return;
     }
     /* Accumulate plain JSON body for single-shot delivery. */
-    if (b->json_len + n > b->json_cap) {
-        size_t new_cap = b->json_cap == 0 ? 4096 : b->json_cap * 2;
-        while (new_cap < b->json_len + n) new_cap *= 2;
-        b->json_buf = xrealloc(b->json_buf, new_cap);
-        b->json_cap = new_cap;
+    if (b->json_overflow) {
+        return;
+    }
+    if (body_buf_grow(&b->json_buf, &b->json_cap, b->json_len + n) != 0) {
+        log_error("http: JSON response body exceeds %u bytes; failing "
+                  "the request", (unsigned)HTTP_BODY_MAX);
+        b->json_overflow = 1;
+        return;
     }
     memcpy(b->json_buf + b->json_len, bytes, n);
     b->json_len += n;
@@ -1003,6 +1057,16 @@ static int http_post_once(struct http_self *h,
     int rc = read_response_body(fd, &resp, initial, initial_len, &body);
     close(fd);
 
+    /* An over-cap body is a failed request, never a truncated one.
+     * EPROTO makes dispatch synthesise a JSON-RPC error for this
+     * call, so the agent gets an answer instead of waiting on a
+     * response that will never come. */
+    if (rc == 0 && (body.json_overflow
+                 || (body.is_sse && body.sse.overflow))) {
+        rc    = -1;
+        errno = EPROTO;
+    }
+
     if (rc == 0 && !body.is_sse && body.json_len > 0) {
         /* Plain JSON response: a single MCP message. Strip any
          * trailing newline (mcp_reader_pop expects the body without
@@ -1013,6 +1077,9 @@ static int http_post_once(struct http_self *h,
             m--;
         }
         http_enqueue(h, body.json_buf, m);
+    }
+    if (body.is_sse) {
+        sse_parser_free(&body.sse);
     }
     free(body.json_buf);
     return rc;

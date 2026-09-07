@@ -51,7 +51,9 @@ static void install_watchdog(void) {
     struct sigaction sa = {0};
     sa.sa_handler = SIG_DFL;
     sigaction(SIGALRM, &sa, NULL);
-    alarm(5);
+    /* Generous: the payload sweep moves several megabytes through
+     * loopback. Still short enough to catch a hang. */
+    alarm(30);
 }
 
 /* ==========================================================
@@ -139,6 +141,65 @@ static int has_header(const char *hdr, size_t n,
 
 /* Serve one request. Returns 1 if this was the initialize request,
  * 0 for a follow-up, -1 on error. */
+/* When non-zero, the non-initialize response carries an SSE event
+ * whose result string is this many bytes. Set before fork_server so
+ * the server child inherits it. Used by the payload-ceiling sweep:
+ * the wrapper used to assemble SSE events into a fixed 64 KiB buffer
+ * and truncate silently past that, which downstream dropped as
+ * unparseable JSON — leaving the agent waiting forever. */
+static size_t g_payload_bytes = 0;
+
+/* The fixed text around the payload in the large-response body. */
+static const char big_prefix[] =
+    "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"text\":\"";
+static const char big_suffix[] = "\"}}";
+
+/* Length of the JSON message the server emits for a given payload. */
+static size_t big_msg_len(size_t payload) {
+    return (sizeof(big_prefix) - 1) + payload + (sizeof(big_suffix) - 1);
+}
+
+/* Write one HTTP chunk with the given body bytes. */
+static int write_chunk(int fd, const char *bytes, size_t n) {
+    char hdr[32];
+    int hn = snprintf(hdr, sizeof(hdr), "%zx\r\n", n);
+    if (write_all(fd, hdr, (size_t)hn) != 0) return -1;
+    if (write_all(fd, bytes, n) != 0) return -1;
+    return write_all(fd, "\r\n", 2);
+}
+
+/* Emit a chunked SSE response whose single data event carries a
+ * result string of g_payload_bytes bytes. Deliberately split across
+ * many small chunks so the chunked decoder and the SSE parser both
+ * see the payload arrive in pieces. */
+static void serve_big(int client_fd) {
+    const char resp_hdr[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    write_all(client_fd, resp_hdr, sizeof(resp_hdr) - 1);
+
+    char head[128];
+    int hn = snprintf(head, sizeof(head), "data: %s", big_prefix);
+    write_chunk(client_fd, head, (size_t)hn);
+
+    char filler[8192];
+    memset(filler, 'x', sizeof(filler));
+    size_t left = g_payload_bytes;
+    while (left > 0) {
+        size_t take = left < sizeof(filler) ? left : sizeof(filler);
+        if (write_chunk(client_fd, filler, take) != 0) return;
+        left -= take;
+    }
+
+    char tail[32];
+    int tn = snprintf(tail, sizeof(tail), "%s\n\n", big_suffix);
+    write_chunk(client_fd, tail, (size_t)tn);
+    write_all(client_fd, "0\r\n\r\n", 5);
+}
+
 static int serve_one(int client_fd, int is_first) {
     char hdr_buf[4096];
     size_t total = 0, hdr_end = 0;
@@ -194,6 +255,11 @@ static int serve_one(int client_fd, int is_first) {
             sizeof(json_body) - 1, json_body);
         write_all(client_fd, resp, (size_t)n);
         return 1;
+    }
+
+    if (g_payload_bytes > 0) {
+        serve_big(client_fd);
+        return 0;
     }
 
     /* tools/list (or any follow-up) → SSE body with one response and
@@ -308,10 +374,15 @@ static void collect(void *vctx, const char *line, size_t len) {
     c->total += take;
 }
 
-static int pump_until(struct transport *t, struct collector *c,
+/* Pump until `*count` reaches want_msgs or the poll times out.
+ * `count` points at the collector's own tally, so this works for any
+ * collector shape. */
+static int pump_until(struct transport *t,
+                      transport_on_message on_msg, void *ctx,
+                      const size_t *count,
                       size_t want_msgs, int timeout_ms) {
     int fd = transport_poll_fd(t);
-    while (c->count < want_msgs) {
+    while (*count < want_msgs) {
         struct pollfd pfd = { .fd = fd, .events = POLLIN };
         int pr = poll(&pfd, 1, timeout_ms);
         if (pr == 0) break;
@@ -319,7 +390,7 @@ static int pump_until(struct transport *t, struct collector *c,
             if (errno == EINTR) continue;
             break;
         }
-        int r = transport_pump(t, collect, c);
+        int r = transport_pump(t, on_msg, ctx);
         if (r < 0) return -1;
     }
     return 0;
@@ -359,7 +430,7 @@ static void test_round_trip(void) {
     CHECK(rc == 0, "initialize sent");
 
     struct collector coll = {0};
-    rc = pump_until(t, &coll, 1, 2000);
+    rc = pump_until(t, collect, &coll, &coll.count, 1, 2000);
     CHECK(rc == 0, "pump succeeded");
     CHECK(coll.count == 1, "one message collected for initialize");
     CHECK(contains(coll.buf, coll.total, "\"result\""),
@@ -374,7 +445,7 @@ static void test_round_trip(void) {
     rc = transport_send(t, list_msg, sizeof(list_msg) - 1);
     CHECK(rc == 0, "tools/list sent (session id propagated)");
 
-    rc = pump_until(t, &coll, 2, 2000);
+    rc = pump_until(t, collect, &coll, &coll.count, 2, 2000);
     CHECK(rc == 0, "pump succeeded for tools/list");
     CHECK(coll.count == 2, "two messages collected (response + notification)");
 
@@ -392,6 +463,119 @@ static void test_round_trip(void) {
 
     int status = 0;
     waitpid(child, &status, 0);
+}
+
+/* Records only the shape of each delivered message, so the sweep can
+ * run at megabyte sizes without a megabyte-sized buffer. */
+struct big_collector {
+    size_t count;
+    size_t len;        /* length of the first message */
+    int    head_ok;    /* first message starts with the expected prefix */
+    int    tail_ok;    /* ...and ends with the expected suffix */
+};
+
+static void collect_big(void *vctx, const char *line, size_t len) {
+    struct big_collector *c = vctx;
+    if (c->count++ > 0) return;
+    c->len = len;
+    c->head_ok = len >= sizeof(big_prefix) - 1
+              && memcmp(line, big_prefix, sizeof(big_prefix) - 1) == 0;
+    c->tail_ok = len >= sizeof(big_suffix) - 1
+              && memcmp(line + len - (sizeof(big_suffix) - 1),
+                        big_suffix, sizeof(big_suffix) - 1) == 0;
+}
+
+/* Drive one request/response pair at the given payload size and
+ * report what came back. Returns the transport_send result for the
+ * second (large) request; *out is filled from the pump. */
+static int drive_payload(size_t payload, struct big_collector *out,
+                         int *send_errno) {
+    g_payload_bytes = payload;
+    pid_t child = 0;
+    int port = fork_server(2, &child);
+    if (port <= 0) {
+        g_payload_bytes = 0;
+        return -2;
+    }
+
+    char url[64];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/mcp", port);
+    struct transport *t = transport_http_new(url);
+    transport_start(t);
+
+    const char init_msg[] =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+        "\"params\":{}}\n";
+    transport_send(t, init_msg, sizeof(init_msg) - 1);
+    struct collector coll = {0};
+    pump_until(t, collect, &coll, &coll.count, 1, 2000);
+
+    const char list_msg[] =
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n";
+    errno = 0;
+    int rc = transport_send(t, list_msg, sizeof(list_msg) - 1);
+    *send_errno = errno;
+    if (rc == 0) {
+        pump_until(t, collect_big, out, &out->count, 1, 2000);
+    }
+
+    transport_stop(t);
+    transport_destroy(t);
+    int status = 0;
+    waitpid(child, &status, 0);
+    g_payload_bytes = 0;
+    return rc;
+}
+
+/* A response of any size up to the cap crosses the transport whole.
+ *
+ * The sizes bracket the old fixed 64 KiB SSE buffer: 32 KiB passed
+ * before this test existed, everything at or above 64 KiB was
+ * silently truncated. */
+static void test_payload_sizes(void) {
+    static const size_t sizes[] = {
+        1024u,
+        32u * 1024u,
+        64u * 1024u,
+        200u * 1024u,
+        1024u * 1024u,
+    };
+
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        struct big_collector got = {0};
+        int send_errno = 0;
+        int rc = drive_payload(sizes[i], &got, &send_errno);
+
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "%zu-byte payload: send succeeded", sizes[i]);
+        CHECK(rc == 0, msg);
+        snprintf(msg, sizeof(msg),
+                 "%zu-byte payload: exactly one message delivered",
+                 sizes[i]);
+        CHECK(got.count == 1, msg);
+        snprintf(msg, sizeof(msg),
+                 "%zu-byte payload: delivered whole (%zu of %zu bytes)",
+                 sizes[i], got.len, big_msg_len(sizes[i]));
+        CHECK(got.len == big_msg_len(sizes[i]), msg);
+        snprintf(msg, sizeof(msg),
+                 "%zu-byte payload: message intact end to end", sizes[i]);
+        CHECK(got.head_ok && got.tail_ok, msg);
+    }
+}
+
+/* Past the cap the request fails loudly. It must not hang, and it
+ * must not deliver a truncated message that downstream would drop. */
+static void test_payload_over_cap(void) {
+    struct big_collector got = {0};
+    int send_errno = 0;
+    int rc = drive_payload(5u * 1024u * 1024u, &got, &send_errno);
+
+    CHECK(rc < 0, "over-cap response fails the send rather than hanging");
+    CHECK(send_errno == EPROTO,
+          "over-cap response reports EPROTO so dispatch can answer the "
+          "agent with an error");
+    CHECK(got.count == 0, "no truncated message is delivered");
 }
 
 static void test_bad_url(void) {
@@ -445,6 +629,8 @@ int main(void) {
     test_bad_url();
     test_connection_refused();
     test_round_trip();
+    test_payload_sizes();
+    test_payload_over_cap();
 
     if (fail_count > 0) {
         fprintf(stderr, "%d transport_http_test assertion(s) failed\n",
