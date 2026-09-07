@@ -1,0 +1,6 @@
+{
+  "schema": 2,
+  "name": "both-command-and-url",
+  "command": "/bin/echo",
+  "url": "http://localhost:9000/mcp"
+}

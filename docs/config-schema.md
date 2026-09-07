@@ -43,10 +43,21 @@ grep-ability.
 | `name` | string | yes | — | Identifier the wrapper sends to the daemon on registration; the daemon routes reload broadcasts by this name. Must be unique across all loaded configs. |
 | `command` | string | one of `command`/`url` | — | **Stdio backend.** Absolute path to the wrapped server's binary. Tilde-expanded (`~/...`, `~user/...`) at parse time. |
 | `args` | array of string | no | `[]` | **Stdio backend.** Arguments passed verbatim to `execvp`; no shell expansion. |
-| `url` | string | one of `command`/`url` | — | **HTTP backend.** Plain `http://` URL to a localhost MCP Streamable HTTP endpoint. Host must be `localhost`, `127.0.0.1`, or `::1`. `https://` and remote hosts are out of scope for v1. |
+| `url` | string | one of `command`/`url` | — | **HTTP backend.** Plain `http://` URL to a localhost MCP Streamable HTTP endpoint. Host must be `localhost`, `127.0.0.1`, or `::1` — the IPv6 literal in either bare or RFC 3986 bracketed form (`http://[::1]:9000/mcp`). `https://` and remote hosts are out of scope for v1. |
+| `tool_call_timeout_ms` | int | no | `300000` | **Wrapper-only.** Bounds how long any single tool call may wait for the upstream, including connect-retry backoff. `0` disables the per-call deadline. The daemon's `Config` struct does not carry this field; it never needs it, because only the wrapper talks to the upstream. |
 
 Exactly one of `command` or `url` must be set. The wrapper picks
 the backend based on which field is populated.
+
+Two independent implementations validate this schema: the wrapper's
+`wrapper/src/config.c` and the daemon's `daemon/internal/config`.
+Prose alone did not keep them in step — they had already diverged on
+bracketed IPv6 loopback URLs. `testdata/config-validation/cases.json`
+is the executable counterpart to this table: it names each fixture
+config and whether it is valid, and both validators are tested
+against it (`wrapper/tests/config_test.c`,
+`daemon/internal/config/corpus_test.go`). Change a validation rule
+here and the corpus must change with it, or `make test` goes red.
 
 > **Note on backwards compatibility**: the `source`, `upgrade`, and
 > `check_interval` fields from older configs are silently ignored —

@@ -1,0 +1,5 @@
+{
+  "schema": 2,
+  "name": "http-ipv4-loopback",
+  "url": "http://127.0.0.1:9000/mcp"
+}

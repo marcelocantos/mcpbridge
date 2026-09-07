@@ -57,7 +57,8 @@ TEST_HELPERS = tests/fake_echo tests/fake_mcp tests/fake_http_mcp
 BIN        = mcpbridge
 TEST_BINS  = tests/smoke_test tests/mcp_test tests/fsm_test \
              tests/transport_stdio_test tests/transport_http_test \
-             tests/dispatch_test tests/daemon_client_test
+             tests/dispatch_test tests/daemon_client_test \
+             tests/config_test
 
 .PHONY: all test clean install
 
@@ -113,6 +114,13 @@ tests/transport_stdio_test: tests/transport_stdio_test.o \
 tests/transport_http_test: tests/transport_http_test.o \
                            $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/transport_http_test.o \
+	    $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+
+# config_test walks the shared ../testdata/config-validation corpus,
+# the same one daemon/internal/config/corpus_test.go reads. It is the
+# only thing forcing the C and Go validators to agree.
+tests/config_test: tests/config_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ tests/config_test.o \
 	    $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)
 
 tests/dispatch_test: tests/dispatch_test.o $(CORE_SRCS:.c=.o) $(CJSON_SRCS:.c=.o)

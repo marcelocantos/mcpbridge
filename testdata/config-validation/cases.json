@@ -1,0 +1,89 @@
+{
+  "comment": [
+    "Shared config-validation corpus. The wrapper (C, wrapper/src/config.c)",
+    "and the daemon (Go, daemon/internal/config) each parse and validate the",
+    "same schema-v2 config files. They are separate implementations, so they",
+    "can drift apart silently: a config the daemon happily discovers can be",
+    "rejected by the wrapper at startup, or vice versa.",
+    "",
+    "This file is the single source of truth for which configs are valid.",
+    "wrapper/tests/config_test.c and daemon/internal/config/corpus_test.go",
+    "both read it and assert their own validator agrees, case by case. Adding",
+    "a case here without fixing both validators turns the build red.",
+    "",
+    "docs/config-schema.md is the prose reference; this corpus is its",
+    "executable counterpart."
+  ],
+  "cases": [
+    {
+      "file": "http-localhost.json",
+      "valid": true,
+      "why": "plain http to the loopback name"
+    },
+    {
+      "file": "http-ipv4-loopback.json",
+      "valid": true,
+      "why": "plain http to 127.0.0.1"
+    },
+    {
+      "file": "http-ipv6-loopback-port.json",
+      "valid": true,
+      "why": "RFC 3986 bracketed IPv6 loopback with a port; both validators must strip the brackets before comparing the host"
+    },
+    {
+      "file": "http-ipv6-loopback-no-port.json",
+      "valid": true,
+      "why": "bracketed IPv6 loopback with no port"
+    },
+    {
+      "file": "http-remote-host.json",
+      "valid": false,
+      "why": "remote hosts are out of scope for v1"
+    },
+    {
+      "file": "http-localhost-suffix.json",
+      "valid": false,
+      "why": "the loopback check is whole-host, not a prefix match"
+    },
+    {
+      "file": "http-https-scheme.json",
+      "valid": false,
+      "why": "https is out of scope for v1"
+    },
+    {
+      "file": "http-missing-host.json",
+      "valid": false,
+      "why": "no host between the scheme and the port"
+    },
+    {
+      "file": "stdio-absolute.json",
+      "valid": true,
+      "why": "stdio backend with an absolute command and args"
+    },
+    {
+      "file": "both-command-and-url.json",
+      "valid": false,
+      "why": "command and url are mutually exclusive"
+    },
+    {
+      "file": "neither-command-nor-url.json",
+      "valid": false,
+      "why": "exactly one of command or url is required"
+    },
+    {
+      "file": "schema-v1.json",
+      "valid": false,
+      "why": "schema v1 is no longer accepted"
+    },
+    {
+      "file": "missing-name.json",
+      "valid": false,
+      "why": "name is required; the daemon routes reload broadcasts by it"
+    },
+    {
+      "file": "vestigial-scheduler-fields.json",
+      "valid": true,
+      "why": "source/upgrade/check_interval were retired in v0.8.0 and must still load, ignored"
+    }
+  ]
+}
