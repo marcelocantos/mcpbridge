@@ -65,12 +65,10 @@ Environment:
 - `MCPBRIDGE_SOCKET` — overrides the UDS path. **stable**.
 - `MCPBRIDGE_CONFIG_DIR` — overrides the config search path
   (primarily used by tests). **stable**.
-- `MCPBRIDGE_BREW_PATH` — explicit path to the `brew` executable
-  for the brew source backend. If unset, the daemon resolves via
-  `$PATH`, then falls back to known install locations
-  (`/opt/homebrew/bin/brew`, `/usr/local/bin/brew`,
-  `/home/linuxbrew/.linuxbrew/bin/brew`). Added in v0.3.0.
-  **stable**.
+- `MCPBRIDGE_BREW_PATH` — **retired in v0.8.0**, along with the
+  brew source backend it configured. Nothing reads it; setting it
+  has no effect. Listed here only so operators who set it in v0.3.0
+  can find out why it stopped mattering.
 
 ### Socket path resolution
 
@@ -113,9 +111,11 @@ Message types (all **stable** for v1):
 
 Known `reason` strings on `reload`:
 - `manual` (SIGHUP)
-- `brew_upgrade`
-- `github_release`
 - `binary_changed` (fsnotify)
+
+`brew_upgrade` and `github_release` were **retired in v0.8.0** with
+the polling backends. The daemon never emits them; a wrapper must
+still tolerate an unknown `reason` (treat it as `manual`).
 
 Known `status` values on `reload_ack`: `ok`, `drain_timeout`,
 `spawn_failed`, `init_failed`.
@@ -135,18 +135,17 @@ Envelope fields:
 | `command` | string | one of `command`/`url` | — | **stable** — stdio backend; tilde-expanded at parse time. |
 | `args` | array of string | no | `[]` | **stable** — passed verbatim to `execvp`; no shell expansion. |
 | `url` | string | one of `command`/`url` | — | **stable** — plain `http://` loopback URLs only in v1 of the HTTP backend (`localhost` / `127.0.0.1` / `::1`); `https://` and remote hosts rejected. |
-| `source` | object | yes | — | **stable** (see per-type below) |
-| `upgrade` | `off`\|`notify`\|`auto` | no | `notify` | **stable** |
-| `check_interval` | Go duration | no | `1h` | **stable** |
+| `source` | object | no | — | **retired in v0.8.0** — parsed by neither binary; present files still load, the field is ignored. |
+| `upgrade` | `off`\|`notify`\|`auto` | no | — | **retired in v0.8.0** — see `source`. |
+| `check_interval` | Go duration | no | — | **retired in v0.8.0** — see `source`. |
 | `tool_call_timeout_ms` | int (≥0) | no | `300000` | **stable** — added in v0.6.0. Bounds how long any single tool call may wait for the upstream when the HTTP backend is in retry. `0` disables the bound (retry until the agent or some outer timeout intervenes). Idle wrapper does no upstream I/O regardless of value. |
 
-Source `brew`:
-- `type: "brew"`, `formula: "<string>"` — **stable**
-
-Source `github`:
-- `type: "github"`, `repo: "owner/name"` — **stable**
-- `asset`, `binary_in_archive`, `checksum_asset` — **stable**
-- Template vars in `asset`: `{version}`, `{tag}`, `{os}`, `{arch}` — **stable**
+The `source` sub-schemas (`brew`, `github`, their `formula` /
+`repo` / `asset` / `binary_in_archive` / `checksum_asset` keys and
+`{version}` / `{tag}` / `{os}` / `{arch}` template vars) were
+**retired in v0.8.0** with the upgrade-polling backends. They are
+not parsed and carry no contract. The daemon now detects upstream
+changes one way only: fsnotify on the wrapped binary.
 
 Config discovery paths:
 1. `$MCPBRIDGE_CONFIG_DIR` (if set; overrides everything)
@@ -235,15 +234,11 @@ stability commitment.
 
 These must be addressed before the v1.0.0 release can ship.
 
-1. **Version-derivation for github source baselining.** The
-   scheduler currently caches "whatever GitHub says is latest on
-   the first poll" as the baseline, rather than asking the wrapped
-   binary what version it is. This is safe but means the first
-   poll per config is always a no-op. Before 1.0, pick one of:
-   (a) accept this as intended behaviour and document it more
-   prominently, or (b) add an optional `version_cmd` field to the
-   config so the scheduler can learn the installed version by
-   running a user-supplied command (e.g., `mnemo --version`).
+1. **Resolved as of v0.8.0** — version-derivation for github
+   source baselining. The question died with the scheduler: there
+   is no polling, no baseline to derive, and no `version_cmd`
+   field. Reload is driven by fsnotify on the wrapped binary, which
+   needs no version at all.
 
 2. **Resolved as of v0.4.0** — config-driven `name`. The wrapper no
    longer infers a name from the launch command; the config file's
@@ -290,13 +285,13 @@ These must be addressed before the v1.0.0 release can ship.
 
    - **reload_ack failure statuses acted on.** The `reload_ack`
      envelope already defines `drain_timeout`, `spawn_failed`,
-     and `init_failed` values alongside `ok`, but nothing in
-     the scheduler currently reacts to them — the daemon logs
-     and continues, and the next poll triggers another upgrade
-     attempt regardless. Before 1.0, the scheduler should
-     treat non-`ok` ack statuses as signal to back off the
-     source for that config (configurable cooldown) and surface
-     a health indicator via a future `status` RPC.
+     and `init_failed` values alongside `ok`, but nothing on the
+     daemon side reacts to them — it logs and continues, and the
+     next fsnotify event triggers another reload regardless.
+     Before 1.0, the daemon should treat non-`ok` ack statuses
+     as signal to back off reloads for that config (configurable
+     cooldown) and surface a health indicator via a future
+     `status` RPC.
 
    - **Eager tools/list diff instead of unconditional emission.**
      v0.2.0's "just emit three notifications" approach is
