@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <limits.h>
 
 /* ---------- Id ---------- */
 
@@ -74,16 +75,534 @@ static int extract_id(const cJSON *obj, struct mcp_id *out) {
 
 /* ---------- Message ---------- */
 
-int mcp_msg_parse(const char *bytes, size_t len, struct mcp_msg *out) {
-    if (out == NULL) {
+#define SCAN_FALLBACK 1
+
+#ifndef CJSON_NESTING_LIMIT
+#define CJSON_NESTING_LIMIT 1000
+#endif
+
+struct scan_cur {
+    const unsigned char *p;
+    const unsigned char *end;
+    int depth;
+};
+
+static int scan_peek(const struct scan_cur *c) {
+    return (c->p < c->end) ? (int)c->p[0] : -1;
+}
+
+static void scan_ws(struct scan_cur *c) {
+    while (c->p < c->end && c->p[0] <= 32) {
+        c->p++;
+    }
+}
+
+static int scan_key_is(const unsigned char *s, size_t n, const char *lit) {
+    size_t ln = strlen(lit);
+    return n == ln && memcmp(s, lit, n) == 0;
+}
+
+static int scan_hex_value(const unsigned char *p) {
+    int v = 0;
+    for (int i = 0; i < 4; i++) {
+        int ch = p[i];
+        int d;
+        if (ch >= '0' && ch <= '9') {
+            d = ch - '0';
+        } else if (ch >= 'a' && ch <= 'f') {
+            d = ch - 'a' + 10;
+        } else if (ch >= 'A' && ch <= 'F') {
+            d = ch - 'A' + 10;
+        } else {
+            return -1;
+        }
+        v = (v << 4) | d;
+    }
+    return v;
+}
+
+/* Advance past a JSON string. Sets *has_esc if any escape was seen.
+ * inner/inner_len, when non-NULL, receive the raw slice between the
+ * quotes (still escaped if has_esc). */
+static int scan_string(struct scan_cur *c,
+                       const unsigned char **inner,
+                       size_t *inner_len,
+                       int *has_esc) {
+    if (scan_peek(c) != '"') {
+        return 0;
+    }
+    const unsigned char *start = c->p + 1;
+    c->p++;
+    int esc = 0;
+    while (c->p < c->end) {
+        unsigned char ch = c->p[0];
+        if (ch == '"') {
+            if (inner != NULL) {
+                *inner = start;
+            }
+            if (inner_len != NULL) {
+                *inner_len = (size_t)(c->p - start);
+            }
+            if (has_esc != NULL) {
+                *has_esc = esc;
+            }
+            c->p++;
+            return 1;
+        }
+        if (ch != '\\') {
+            c->p++;
+            continue;
+        }
+        esc = 1;
+        c->p++;
+        if (c->p >= c->end) {
+            return 0;
+        }
+        unsigned char e = c->p[0];
+        switch (e) {
+        case '"':
+        case '\\':
+        case '/':
+        case 'b':
+        case 'f':
+        case 'n':
+        case 'r':
+        case 't':
+            c->p++;
+            break;
+        case 'u': {
+            c->p++;
+            if ((size_t)(c->end - c->p) < 4) {
+                return 0;
+            }
+            int cp = scan_hex_value(c->p);
+            if (cp < 0) {
+                return 0;
+            }
+            c->p += 4;
+            if (cp >= 0xD800 && cp <= 0xDBFF) {
+                if ((size_t)(c->end - c->p) < 6 ||
+                    c->p[0] != '\\' || c->p[1] != 'u') {
+                    return 0;
+                }
+                int lo = scan_hex_value(c->p + 2);
+                if (lo < 0xDC00 || lo > 0xDFFF) {
+                    return 0;
+                }
+                c->p += 6;
+            } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                return 0;
+            }
+            break;
+        }
+        default:
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/* Consume a number the same way cJSON's parse_number does: a run of
+ * [0-9+-.eE] that strtod would accept. Requires at least one digit. */
+static int scan_number(struct scan_cur *c, int *saw_non_int) {
+    if (c->p >= c->end) {
+        return 0;
+    }
+    unsigned char ch = c->p[0];
+    if (ch != '-' && (ch < '0' || ch > '9')) {
+        return 0;
+    }
+    int digit = 0;
+    int non_int = 0;
+    while (c->p < c->end) {
+        ch = c->p[0];
+        if (ch >= '0' && ch <= '9') {
+            digit = 1;
+            c->p++;
+            continue;
+        }
+        if (ch == '.' || ch == 'e' || ch == 'E' || ch == '+' || ch == '-') {
+            if (ch == '.' || ch == 'e' || ch == 'E') {
+                non_int = 1;
+            }
+            c->p++;
+            continue;
+        }
+        break;
+    }
+    if (saw_non_int != NULL) {
+        *saw_non_int = non_int;
+    }
+    return digit;
+}
+
+static int scan_literal(struct scan_cur *c, const char *lit, size_t n) {
+    if ((size_t)(c->end - c->p) < n) {
+        return 0;
+    }
+    if (memcmp(c->p, lit, n) != 0) {
+        return 0;
+    }
+    c->p += n;
+    return 1;
+}
+
+static int scan_value(struct scan_cur *c);
+
+static int scan_array(struct scan_cur *c) {
+    if (scan_peek(c) != '[') {
+        return 0;
+    }
+    if (c->depth >= CJSON_NESTING_LIMIT) {
+        return 0;
+    }
+    c->depth++;
+    c->p++;
+    scan_ws(c);
+    if (scan_peek(c) == ']') {
+        c->p++;
+        c->depth--;
+        return 1;
+    }
+    for (;;) {
+        scan_ws(c);
+        if (!scan_value(c)) {
+            return 0;
+        }
+        scan_ws(c);
+        if (scan_peek(c) == ',') {
+            c->p++;
+            continue;
+        }
+        if (scan_peek(c) == ']') {
+            c->p++;
+            c->depth--;
+            return 1;
+        }
+        return 0;
+    }
+}
+
+static int scan_object(struct scan_cur *c) {
+    if (scan_peek(c) != '{') {
+        return 0;
+    }
+    if (c->depth >= CJSON_NESTING_LIMIT) {
+        return 0;
+    }
+    c->depth++;
+    c->p++;
+    scan_ws(c);
+    if (scan_peek(c) == '}') {
+        c->p++;
+        c->depth--;
+        return 1;
+    }
+    for (;;) {
+        scan_ws(c);
+        if (!scan_string(c, NULL, NULL, NULL)) {
+            return 0;
+        }
+        scan_ws(c);
+        if (scan_peek(c) != ':') {
+            return 0;
+        }
+        c->p++;
+        scan_ws(c);
+        if (!scan_value(c)) {
+            return 0;
+        }
+        scan_ws(c);
+        if (scan_peek(c) == ',') {
+            c->p++;
+            continue;
+        }
+        if (scan_peek(c) == '}') {
+            c->p++;
+            c->depth--;
+            return 1;
+        }
+        return 0;
+    }
+}
+
+static int scan_value(struct scan_cur *c) {
+    int ch = scan_peek(c);
+    if (ch == 'n') {
+        return scan_literal(c, "null", 4);
+    }
+    if (ch == 'f') {
+        return scan_literal(c, "false", 5);
+    }
+    if (ch == 't') {
+        return scan_literal(c, "true", 4);
+    }
+    if (ch == '"') {
+        return scan_string(c, NULL, NULL, NULL);
+    }
+    if (ch == '-' || (ch >= '0' && ch <= '9')) {
+        return scan_number(c, NULL);
+    }
+    if (ch == '[') {
+        return scan_array(c);
+    }
+    if (ch == '{') {
+        return scan_object(c);
+    }
+    return 0;
+}
+
+static int scan_parse_int64(const unsigned char *s, size_t n, int64_t *out) {
+    if (n == 0) {
+        return 0;
+    }
+    int neg = 0;
+    size_t i = 0;
+    if (s[0] == '-') {
+        neg = 1;
+        i++;
+    }
+    if (i >= n || s[i] < '0' || s[i] > '9') {
+        return 0;
+    }
+    uint64_t acc = 0;
+    for (; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') {
+            return 0;
+        }
+        uint64_t d = (uint64_t)(s[i] - '0');
+        if (acc > (UINT64_MAX - d) / 10u) {
+            return 0;
+        }
+        acc = acc * 10u + d;
+    }
+    if (neg) {
+        if (acc > (uint64_t)INT64_MAX + 1u) {
+            return 0;
+        }
+        *out = (acc == (uint64_t)INT64_MAX + 1u)
+            ? INT64_MIN
+            : -(int64_t)acc;
+    } else {
+        if (acc > (uint64_t)INT64_MAX) {
+            return 0;
+        }
+        *out = (int64_t)acc;
+    }
+    return 1;
+}
+
+static void scan_skip_bom(struct scan_cur *c) {
+    if ((size_t)(c->end - c->p) >= 3 &&
+        c->p[0] == 0xEF && c->p[1] == 0xBB && c->p[2] == 0xBF) {
+        c->p += 3;
+    }
+}
+
+static int classify_envelope(int has_id, int has_method,
+                             int has_result, int has_error,
+                             enum mcp_kind *kind, int *is_error) {
+    if (has_method && has_id) {
+        *kind = MCP_KIND_REQUEST;
+        *is_error = 0;
+        return MCP_PARSE_OK;
+    }
+    if (has_method && !has_id) {
+        *kind = MCP_KIND_NOTIFICATION;
+        *is_error = 0;
+        return MCP_PARSE_OK;
+    }
+    if (!has_method && has_id && (has_result || has_error)) {
+        *kind = MCP_KIND_RESPONSE;
+        *is_error = has_error;
+        return MCP_PARSE_OK;
+    }
+    return MCP_PARSE_ERR_INCOHERENT;
+}
+
+/* Validating top-level scanner. Returns MCP_PARSE_OK and fills *out
+ * without touching cJSON; SCAN_FALLBACK when an escaped id/method or
+ * key needs cJSON to unescape; or an MCP_PARSE_ERR_* code. Skipped
+ * values are still validated, so a message cJSON would refuse is not
+ * forwarded. Duplicate keys are first-wins. */
+static int scan_envelope(const char *bytes, size_t len, struct mcp_msg *out) {
+    struct scan_cur c = {
+        .p = (const unsigned char *)bytes,
+        .end = (const unsigned char *)bytes + len,
+        .depth = 0,
+    };
+    scan_skip_bom(&c);
+    scan_ws(&c);
+    if (scan_peek(&c) != '{') {
+        if (scan_value(&c)) {
+            return MCP_PARSE_ERR_NOT_OBJECT;
+        }
         return MCP_PARSE_ERR_JSON;
     }
+
+    int seen_id = 0, seen_method = 0, seen_result = 0, seen_error = 0;
+    int has_id = 0, has_method = 0, has_result = 0, has_error = 0;
+    enum mcp_id_tag id_tag = MCP_ID_NONE;
+    int64_t id_i = 0;
+    const unsigned char *id_s = NULL;
+    size_t id_slen = 0;
+    const unsigned char *method = NULL;
+    size_t method_len = 0;
+    int fallback = 0;
+
+    if (c.depth >= CJSON_NESTING_LIMIT) {
+        return MCP_PARSE_ERR_JSON;
+    }
+    c.depth++;
+    c.p++;
+    scan_ws(&c);
+    if (scan_peek(&c) == '}') {
+        c.p++;
+        return MCP_PARSE_ERR_INCOHERENT;
+    }
+
+    for (;;) {
+        scan_ws(&c);
+        const unsigned char *key = NULL;
+        size_t klen = 0;
+        int key_esc = 0;
+        if (!scan_string(&c, &key, &klen, &key_esc)) {
+            return MCP_PARSE_ERR_JSON;
+        }
+        if (key_esc) {
+            fallback = 1;
+        }
+        scan_ws(&c);
+        if (scan_peek(&c) != ':') {
+            return MCP_PARSE_ERR_JSON;
+        }
+        c.p++;
+        scan_ws(&c);
+
+        int take = 0;
+        int is_id = !key_esc && scan_key_is(key, klen, "id");
+        int is_method = !key_esc && scan_key_is(key, klen, "method");
+        int is_result = !key_esc && scan_key_is(key, klen, "result");
+        int is_error = !key_esc && scan_key_is(key, klen, "error");
+
+        if (is_id && !seen_id) {
+            seen_id = 1;
+            take = 1;
+        } else if (is_method && !seen_method) {
+            seen_method = 1;
+            take = 1;
+        } else if (is_result && !seen_result) {
+            seen_result = 1;
+            has_result = 1;
+        } else if (is_error && !seen_error) {
+            seen_error = 1;
+            has_error = 1;
+        }
+
+        if (take && is_id) {
+            int ch = scan_peek(&c);
+            if (ch == '"') {
+                int esc = 0;
+                if (!scan_string(&c, &id_s, &id_slen, &esc)) {
+                    return MCP_PARSE_ERR_JSON;
+                }
+                if (esc) {
+                    fallback = 1;
+                } else {
+                    has_id = 1;
+                    id_tag = MCP_ID_STRING;
+                }
+            } else if (ch == '-' || (ch >= '0' && ch <= '9')) {
+                const unsigned char *nstart = c.p;
+                int non_int = 0;
+                if (!scan_number(&c, &non_int)) {
+                    return MCP_PARSE_ERR_JSON;
+                }
+                if (non_int) {
+                    /* Float or scientific: cJSON decides BAD_ID vs int. */
+                    fallback = 1;
+                } else if (!scan_parse_int64(nstart, (size_t)(c.p - nstart), &id_i)) {
+                    fallback = 1;
+                } else {
+                    has_id = 1;
+                    id_tag = MCP_ID_INT;
+                }
+            } else {
+                if (!scan_value(&c)) {
+                    return MCP_PARSE_ERR_JSON;
+                }
+                return MCP_PARSE_ERR_BAD_ID;
+            }
+        } else if (take && is_method) {
+            int ch = scan_peek(&c);
+            if (ch == '"') {
+                int esc = 0;
+                if (!scan_string(&c, &method, &method_len, &esc)) {
+                    return MCP_PARSE_ERR_JSON;
+                }
+                if (esc) {
+                    fallback = 1;
+                } else {
+                    has_method = 1;
+                }
+            } else {
+                if (!scan_value(&c)) {
+                    return MCP_PARSE_ERR_JSON;
+                }
+                return MCP_PARSE_ERR_BAD_METHOD;
+            }
+        } else if (!scan_value(&c)) {
+            return MCP_PARSE_ERR_JSON;
+        }
+
+        scan_ws(&c);
+        if (scan_peek(&c) == ',') {
+            c.p++;
+            continue;
+        }
+        if (scan_peek(&c) == '}') {
+            c.p++;
+            break;
+        }
+        return MCP_PARSE_ERR_JSON;
+    }
+
+    if (fallback) {
+        return SCAN_FALLBACK;
+    }
+
+    enum mcp_kind kind = MCP_KIND_UNKNOWN;
+    int is_error = 0;
+    int rc = classify_envelope(has_id, has_method, has_result, has_error,
+                               &kind, &is_error);
+    if (rc != MCP_PARSE_OK) {
+        return rc;
+    }
+
     memset(out, 0, sizeof(*out));
-
-    if (bytes == NULL || len == 0) {
-        return MCP_PARSE_ERR_JSON;
+    out->kind = kind;
+    out->is_error = is_error;
+    if (id_tag == MCP_ID_INT) {
+        out->id.tag = MCP_ID_INT;
+        out->id.v.i = id_i;
+    } else if (id_tag == MCP_ID_STRING) {
+        out->id.tag = MCP_ID_STRING;
+        out->id.v.s = xmalloc(id_slen + 1);
+        memcpy(out->id.v.s, id_s, id_slen);
+        out->id.v.s[id_slen] = '\0';
     }
+    if (has_method) {
+        out->method = xmalloc(method_len + 1);
+        memcpy(out->method, method, method_len);
+        out->method[method_len] = '\0';
+    }
+    out->raw = xmalloc(len);
+    memcpy(out->raw, bytes, len);
+    out->raw_len = len;
+    return MCP_PARSE_OK;
+}
 
+static int parse_via_cjson(const char *bytes, size_t len, struct mcp_msg *out) {
     cJSON *root = cJSON_ParseWithLength(bytes, len);
     if (root == NULL) {
         return MCP_PARSE_ERR_JSON;
@@ -131,13 +650,30 @@ int mcp_msg_parse(const char *bytes, size_t len, struct mcp_msg *out) {
         return MCP_PARSE_ERR_INCOHERENT;
     }
 
-    /* Retain the raw bytes for verbatim forwarding. */
     out->raw = xmalloc(len);
     memcpy(out->raw, bytes, len);
     out->raw_len = len;
 
     cJSON_Delete(root);
     return MCP_PARSE_OK;
+}
+
+int mcp_msg_parse(const char *bytes, size_t len, struct mcp_msg *out) {
+    if (out == NULL) {
+        return MCP_PARSE_ERR_JSON;
+    }
+    memset(out, 0, sizeof(*out));
+
+    if (bytes == NULL || len == 0) {
+        return MCP_PARSE_ERR_JSON;
+    }
+
+    int rc = scan_envelope(bytes, len, out);
+    if (rc == SCAN_FALLBACK) {
+        memset(out, 0, sizeof(*out));
+        return parse_via_cjson(bytes, len, out);
+    }
+    return rc;
 }
 
 void mcp_msg_free(struct mcp_msg *m) {
