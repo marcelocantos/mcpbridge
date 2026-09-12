@@ -87,7 +87,13 @@ struct mcp_msg {
  * The slice must NOT contain a trailing newline. On success, *out is
  * populated with owned copies of the interesting fields and must be
  * freed with mcp_msg_free(). On failure, *out is left zeroed and the
- * function returns one of the MCP_PARSE_* error codes below. */
+ * function returns one of the MCP_PARSE_* error codes below.
+ *
+ * Classification is a validating top-level scan (id, method, presence
+ * of result/error). The payload is not materialised as a cJSON tree.
+ * Duplicate keys are first-wins. A string id or method containing an
+ * escape falls back to cJSON. A skipped value is still validated, so
+ * a message cJSON would refuse is not forwarded. */
 #define MCP_PARSE_OK              0
 #define MCP_PARSE_ERR_JSON       -1 /* malformed JSON */
 #define MCP_PARSE_ERR_NOT_OBJECT -2 /* top-level not a JSON object */

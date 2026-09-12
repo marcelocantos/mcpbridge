@@ -163,6 +163,256 @@ static void test_parse_rejects_incoherent(void) {
     CHECK(rc == MCP_PARSE_ERR_INCOHERENT, "id without method/result rejected");
 }
 
+/* ---------- T24 / T28 parse-skip contract ----------
+ *
+ * The hot path must classify without building a cJSON tree, but it
+ * must not change the contract. Three traps the scanner has to match:
+ * first-wins on duplicate keys, escaped id/method fallback, and
+ * skip-must-validate (a skipped value is still a JSON value). */
+
+static uint64_t cjson_allocs;
+
+static void *counting_malloc(size_t n) {
+    cjson_allocs++;
+    return malloc(n);
+}
+
+static void counting_free(void *p) {
+    free(p);
+}
+
+/* Reference classifier: today's cJSON path, copied into the test so
+ * the scanner cannot silently become the only implementation. */
+static int ref_parse(const char *bytes, size_t len, struct mcp_msg *out) {
+    memset(out, 0, sizeof(*out));
+    if (bytes == NULL || len == 0) {
+        return MCP_PARSE_ERR_JSON;
+    }
+    cJSON *root = cJSON_ParseWithLength(bytes, len);
+    if (root == NULL) {
+        return MCP_PARSE_ERR_JSON;
+    }
+    if (!cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return MCP_PARSE_ERR_NOT_OBJECT;
+    }
+
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
+    if (id != NULL) {
+        if (cJSON_IsString(id) && id->valuestring != NULL) {
+            out->id.tag = MCP_ID_STRING;
+            out->id.v.s = strdup(id->valuestring);
+        } else if (cJSON_IsNumber(id)) {
+            double d = id->valuedouble;
+            if (d != (double)(int64_t)d) {
+                cJSON_Delete(root);
+                return MCP_PARSE_ERR_BAD_ID;
+            }
+            out->id.tag = MCP_ID_INT;
+            out->id.v.i = (int64_t)d;
+        } else {
+            cJSON_Delete(root);
+            return MCP_PARSE_ERR_BAD_ID;
+        }
+    }
+
+    const cJSON *method = cJSON_GetObjectItemCaseSensitive(root, "method");
+    if (method != NULL) {
+        if (!cJSON_IsString(method) || method->valuestring == NULL) {
+            mcp_id_free(&out->id);
+            cJSON_Delete(root);
+            return MCP_PARSE_ERR_BAD_METHOD;
+        }
+        out->method = strdup(method->valuestring);
+    }
+
+    const cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "result");
+    const cJSON *error  = cJSON_GetObjectItemCaseSensitive(root, "error");
+
+    if (out->method != NULL && out->id.tag != MCP_ID_NONE) {
+        out->kind = MCP_KIND_REQUEST;
+    } else if (out->method != NULL && out->id.tag == MCP_ID_NONE) {
+        out->kind = MCP_KIND_NOTIFICATION;
+    } else if (out->method == NULL && out->id.tag != MCP_ID_NONE &&
+               (result != NULL || error != NULL)) {
+        out->kind = MCP_KIND_RESPONSE;
+        out->is_error = (error != NULL);
+    } else {
+        mcp_msg_free(out);
+        cJSON_Delete(root);
+        return MCP_PARSE_ERR_INCOHERENT;
+    }
+    cJSON_Delete(root);
+    return MCP_PARSE_OK;
+}
+
+static void test_parse_skip_must_validate(void) {
+    /* A skipper that only brace-counts would accept these. cJSON
+     * rejects them. The scanner must too — including the value of a
+     * duplicate key it is otherwise ignoring (first-wins). */
+    static const char *const bad[] = {
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"broken\":}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[1,]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"a\":true,}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"unterminated}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"bad\\xescape\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":tru}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":true,\"result\":{\"broken\":}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"params\":{\"a\":[1,2,{\"b\":}]}}",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        struct mcp_msg m = {0};
+        int rc = mcp_msg_parse(bad[i], strlen(bad[i]), &m);
+        CHECK(rc == MCP_PARSE_ERR_JSON, "skip-must-validate: malformed rejected");
+        CHECK(m.raw == NULL, "skip-must-validate: no raw on reject");
+        mcp_msg_free(&m);
+    }
+}
+
+static void test_parse_first_wins_duplicate_keys(void) {
+    struct mcp_msg m = {0};
+    const char *dup_id =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"id\":99,\"method\":\"initialize\"}";
+    CHECK(mcp_msg_parse(dup_id, strlen(dup_id), &m) == MCP_PARSE_OK,
+          "dup id parses");
+    CHECK(m.kind == MCP_KIND_REQUEST, "dup id is still a request");
+    CHECK(m.id.tag == MCP_ID_INT && m.id.v.i == 1, "first id wins");
+    mcp_msg_free(&m);
+
+    const char *dup_method =
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\","
+        "\"method\":\"tools/call\"}";
+    CHECK(mcp_msg_parse(dup_method, strlen(dup_method), &m) == MCP_PARSE_OK,
+          "dup method parses");
+    CHECK(m.method != NULL && strcmp(m.method, "tools/list") == 0,
+          "first method wins");
+    mcp_msg_free(&m);
+
+    const char *dup_result =
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":true,\"result\":false}";
+    CHECK(mcp_msg_parse(dup_result, strlen(dup_result), &m) == MCP_PARSE_OK,
+          "dup result parses");
+    CHECK(m.kind == MCP_KIND_RESPONSE && !m.is_error, "first result, not error");
+    mcp_msg_free(&m);
+}
+
+static void test_parse_escaped_id_method_fallback(void) {
+    /* Escapes in id/method must not be compared raw. Fallback to
+     * cJSON (which unescapes) is the contracted path. */
+    struct mcp_msg m = {0};
+    const char *esc_id =
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a\\tb\",\"method\":\"tools/call\"}";
+    CHECK(mcp_msg_parse(esc_id, strlen(esc_id), &m) == MCP_PARSE_OK,
+          "escaped id parses");
+    CHECK(m.id.tag == MCP_ID_STRING && m.id.v.s != NULL, "escaped id is string");
+    CHECK(strcmp(m.id.v.s, "a\tb") == 0, "escaped id is unescaped");
+    mcp_msg_free(&m);
+
+    const char *esc_method =
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools\\/call\"}";
+    CHECK(mcp_msg_parse(esc_method, strlen(esc_method), &m) == MCP_PARSE_OK,
+          "escaped method parses");
+    CHECK(m.method != NULL && strcmp(m.method, "tools/call") == 0,
+          "escaped method is unescaped");
+    mcp_msg_free(&m);
+}
+
+static void test_parse_hot_path_no_cjson_tree(void) {
+    /* A 64 KiB escape-free tool result. The wrapper only reads the
+     * top-level id and the presence of result. Building a cJSON tree
+     * for the payload is the cost T24/T28 removes. */
+    const char *prefix =
+        "{\"jsonrpc\":\"2.0\",\"id\":4242,\"result\":{\"content\":"
+        "[{\"type\":\"text\",\"text\":\"";
+    const char *suffix = "\"}],\"isError\":false}}";
+    const size_t payload = 64u * 1024u;
+    size_t plen = strlen(prefix), slen = strlen(suffix);
+    size_t len = plen + payload + slen;
+    char *buf = malloc(len);
+    CHECK(buf != NULL, "payload alloc");
+    if (buf == NULL) {
+        return;
+    }
+    memcpy(buf, prefix, plen);
+    memset(buf + plen, 'a', payload);
+    memcpy(buf + plen + payload, suffix, slen);
+
+    cJSON_Hooks hooks = {counting_malloc, counting_free};
+    cJSON_InitHooks(&hooks);
+    cjson_allocs = 0;
+    struct mcp_msg m = {0};
+    int rc = mcp_msg_parse(buf, len, &m);
+    uint64_t n = cjson_allocs;
+    cJSON_InitHooks(NULL);
+
+    CHECK(rc == MCP_PARSE_OK, "large result parses");
+    CHECK(m.kind == MCP_KIND_RESPONSE, "large result is a response");
+    CHECK(m.id.tag == MCP_ID_INT && m.id.v.i == 4242, "large result id");
+    CHECK(n == 0, "hot path does not materialise a cJSON tree");
+    mcp_msg_free(&m);
+    free(buf);
+}
+
+static int msgs_agree(const struct mcp_msg *a, const struct mcp_msg *b) {
+    if (a->kind != b->kind) {
+        return 0;
+    }
+    if (a->is_error != b->is_error) {
+        return 0;
+    }
+    if (!mcp_id_eq(&a->id, &b->id)) {
+        return 0;
+    }
+    if (a->method == NULL || b->method == NULL) {
+        return a->method == b->method;
+    }
+    return strcmp(a->method, b->method) == 0;
+}
+
+static void test_parse_scan_agrees_with_cjson(void) {
+    static const char *const corpus[] = {
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-1,\"message\":\"x\"}}",
+        ("{\"jsonrpc\":\"2.0\",\"id\":\"s\",\"method\":\"tools/call\","
+            "\"params\":{\"name\":\"f\",\"arguments\":{\"n\":1,\"a\":[1,2,{\"k\":null}]}}}"),
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"id\":2,\"method\":\"x\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"a\",\"method\":\"b\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"a\\tb\",\"method\":\"x\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools\\/call\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"broken\":}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[1,]}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1.5,\"method\":\"x\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":42}",
+        "[1,2,3]",
+        "{not json",
+        "",
+        "true",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":true} trailing",
+        "{\"jsonrpc\":\"2.0\",\"id\":-7,\"method\":\"x\"}",
+        "  {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\"}  ",
+    };
+
+    for (size_t i = 0; i < sizeof(corpus) / sizeof(corpus[0]); i++) {
+        const char *bytes = corpus[i];
+        size_t len = strlen(bytes);
+        struct mcp_msg got = {0};
+        struct mcp_msg want = {0};
+        int rc_got = mcp_msg_parse(bytes, len, &got);
+        int rc_want = ref_parse(bytes, len, &want);
+        CHECK(rc_got == rc_want, "differential: return codes agree");
+        if (rc_got == MCP_PARSE_OK && rc_want == MCP_PARSE_OK) {
+            CHECK(msgs_agree(&got, &want),
+                  "differential: kind/id/method/is_error agree");
+        }
+        mcp_msg_free(&got);
+        mcp_msg_free(&want);
+    }
+}
+
 /* ---------- mcp_reader ---------- */
 
 static void test_reader_basic(void) {
@@ -487,6 +737,11 @@ int main(void) {
     test_parse_rejects_float_id();
     test_parse_rejects_non_string_method();
     test_parse_rejects_incoherent();
+    test_parse_skip_must_validate();
+    test_parse_first_wins_duplicate_keys();
+    test_parse_escaped_id_method_fallback();
+    test_parse_hot_path_no_cjson_tree();
+    test_parse_scan_agrees_with_cjson();
     test_reader_basic();
     test_reader_partial();
     test_reader_empty_lines();
