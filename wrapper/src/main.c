@@ -704,7 +704,24 @@ static int run_loop(struct loop_ctx *ctx) {
                 }
                 continue;
             }
-            if (p < 0) { rc = 1; break; }
+            if (p < 0) {
+                /* Over-cap child line. The stdio transport surfaces
+                 * this as EPROTO — the same errno HTTP uses for an
+                 * over-cap body — so we can answer every request
+                 * that was waiting on that child and keep the
+                 * wrapper alive. Any other pump error is fatal. */
+                if (errno == EPROTO) {
+                    log_error("child: oversized line; answering "
+                              "in-flight request(s) so the agent "
+                              "is not left waiting");
+                    dispatch_settle_in_flight(ctx->dispatch,
+                        "mcpbridge: upstream response exceeded "
+                        "maximum size");
+                    continue;
+                }
+                rc = 1;
+                break;
+            }
         }
 
         /* Daemon fd. */

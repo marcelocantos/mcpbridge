@@ -150,9 +150,10 @@ void mcp_reader_feed(struct mcp_reader *r, const char *bytes, size_t n);
  *
  * When both complete lines and pending overflows are available, lines
  * are drained first. This means an overflow may be reported after
- * lines that chronologically followed it on the wire. The wrapper
- * treats TOO_LONG as a log-and-continue event, so this ordering is
- * benign for MCP. */
+ * lines that chronologically followed it on the wire. The stdio
+ * transport treats TOO_LONG as a hard failure (EPROTO) so the event
+ * loop can answer in-flight requests; this ordering is still
+ * benign — valid lines are never lost. */
 #define MCP_READER_OK        1
 #define MCP_READER_EMPTY     0
 #define MCP_READER_TOO_LONG -1

@@ -12,6 +12,7 @@
  * deadline, the test aborts the process itself so a regression
  * shows up as a timeout rather than a silent hang. */
 
+#include "../src/mcp.h"
 #include "../src/transport.h"
 #include "../src/transport_stdio.h"
 
@@ -35,13 +36,16 @@ static int fail_count = 0;
         }                                                                  \
     } while (0)
 
-/* Global hang-buster. If the test hangs for more than 5 seconds,
- * SIGALRM terminates us so the failure surfaces as a timeout. */
+/* Global hang-buster. SIGALRM terminates us so a hang surfaces as
+ * a timeout rather than a silent stall. 30 s matches the HTTP
+ * payload tests: the over-cap case moves just over 4 MiB through
+ * a pipe, which is fast when the transport fails loudly and a
+ * hang if it swallows the line. */
 static void install_watchdog(void) {
     struct sigaction sa = {0};
     sa.sa_handler = SIG_DFL; /* default action for SIGALRM is termination */
     sigaction(SIGALRM, &sa, NULL);
-    alarm(5);
+    alarm(30);
 }
 
 /* Collector for pump() callbacks. Concatenates every message body
@@ -191,12 +195,100 @@ static void test_exec_failure(void) {
     transport_destroy(t);
 }
 
+/* Pump until the child is idle, EOF, or pump itself fails.
+ * Returns the last transport_pump rc (0 idle, 1 EOF, -1 error).
+ * On -1, *out_errno holds the errno from that pump. */
+static int pump_until_idle_or_error(struct transport *t, struct collector *c,
+                                    int timeout_ms, int *out_errno) {
+    int fd = transport_poll_fd(t);
+    int last = 0;
+    if (out_errno != NULL) {
+        *out_errno = 0;
+    }
+    for (;;) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int pr = poll(&pfd, 1, timeout_ms);
+        if (pr == 0) {
+            return last; /* idle: no more bytes, last pump was 0 */
+        }
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            if (out_errno != NULL) {
+                *out_errno = errno;
+            }
+            return -1;
+        }
+        last = transport_pump(t, collect_message, c);
+        if (last < 0) {
+            if (out_errno != NULL) {
+                *out_errno = errno;
+            }
+            return last;
+        }
+        if (last == 1) {
+            return last;
+        }
+    }
+}
+
+/* Past the line cap the child response must fail loudly. The old
+ * reader warned-and-continued, delivered nothing, and left the
+ * request hanging — the same silence the HTTP 64 KiB ceiling hid
+ * behind.
+ *
+ * The child emits the oversized line itself. The parent only
+ * pumps: sending 4 MiB into a pipe whose read end is not yet
+ * being drained deadlocks both sides. */
+static void test_payload_over_cap(void) {
+    const size_t body = (size_t)MCP_LINE_MAX_DEFAULT + 1u;
+    char nbytes[32];
+    snprintf(nbytes, sizeof(nbytes), "%zu", body);
+
+    char *argv[] = {
+        (char *)"./tests/fake_echo",
+        (char *)"--emit-bytes",
+        nbytes,
+        NULL,
+    };
+    struct transport *t = transport_stdio_new("./tests/fake_echo", argv);
+    CHECK(t != NULL, "transport created");
+
+    int rc = transport_start(t);
+    CHECK(rc == 0, "transport started");
+
+    struct collector coll = {0};
+    int pump_errno = 0;
+    int prc = pump_until_idle_or_error(t, &coll, 2000, &pump_errno);
+
+    CHECK(prc < 0, "over-cap line fails the pump rather than hanging");
+    CHECK(pump_errno == EPROTO,
+          "over-cap line reports EPROTO so the event loop can answer "
+          "the agent with an error");
+    CHECK(coll.count == 0, "no truncated message is delivered");
+
+    /* The child is still alive; a later in-cap line must still
+     * round-trip so one oversize response does not kill the session. */
+    const char ok[] = "still-alive\n";
+    rc = transport_send(t, ok, sizeof(ok) - 1);
+    CHECK(rc == 0, "in-cap follow-up sent");
+
+    struct collector follow = {0};
+    int got = pump_until(t, &follow, 1, 2000);
+    CHECK(got == 1, "in-cap follow-up collected after over-cap failure");
+    CHECK(follow.len == sizeof(ok) - 2, "follow-up length matches");
+    CHECK(memcmp(follow.buf, "still-alive", sizeof(ok) - 2) == 0,
+          "follow-up bytes match");
+
+    transport_destroy(t);
+}
+
 int main(void) {
     install_watchdog();
 
     test_round_trip();
     test_destroy_without_start();
     test_exec_failure();
+    test_payload_over_cap();
 
     if (fail_count > 0) {
         fprintf(stderr, "%d transport_stdio_test assertion(s) failed\n", fail_count);
