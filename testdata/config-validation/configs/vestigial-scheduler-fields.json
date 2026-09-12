@@ -1,0 +1,8 @@
+{
+  "schema": 2,
+  "name": "vestigial-scheduler-fields",
+  "command": "/bin/echo",
+  "source": {"type": "github", "repo": "foo/bar"},
+  "upgrade": "auto",
+  "check_interval": "1h"
+}

@@ -115,10 +115,37 @@ static int validate_url(const char *url, const char *path) {
         return 0;
     }
     const char *host_start = url + sizeof(http) - 1;
-    /* Host runs until ':' (port), '/' (path), or end. */
-    const char *host_end = host_start;
-    while (*host_end != '\0' && *host_end != ':' && *host_end != '/') {
-        host_end++;
+    const char *host_end;
+    if (*host_start == '[') {
+        /* RFC 3986 bracketed IPv6 literal: the host is everything
+         * between the brackets, and colons inside it are part of the
+         * address, not a port separator. Without this branch
+         * `http://[::1]/mcp` tokenizes to the host "[" and is
+         * rejected, while the daemon's url.Parse accepts it — the
+         * exact split the shared corpus in
+         * testdata/config-validation now pins down. */
+        host_start++;
+        host_end = host_start;
+        while (*host_end != '\0' && *host_end != ']') {
+            host_end++;
+        }
+        if (*host_end != ']') {
+            fprintf(stderr, "mcpbridge: %s: url has an unterminated '[' in the host\n", path);
+            return 0;
+        }
+        /* Only a port, a path, or end-of-string may follow the ']'. */
+        char after = *(host_end + 1);
+        if (after != '\0' && after != ':' && after != '/') {
+            fprintf(stderr, "mcpbridge: %s: unexpected text after the bracketed host in %s\n",
+                    path, url);
+            return 0;
+        }
+    } else {
+        /* Host runs until ':' (port), '/' (path), or end. */
+        host_end = host_start;
+        while (*host_end != '\0' && *host_end != ':' && *host_end != '/') {
+            host_end++;
+        }
     }
     size_t host_len = (size_t)(host_end - host_start);
     if (host_len == 0) {

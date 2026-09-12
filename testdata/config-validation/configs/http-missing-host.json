@@ -1,0 +1,5 @@
+{
+  "schema": 2,
+  "name": "http-missing-host",
+  "url": "http://:9000/mcp"
+}

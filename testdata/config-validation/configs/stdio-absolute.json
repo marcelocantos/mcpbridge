@@ -1,0 +1,6 @@
+{
+  "schema": 2,
+  "name": "stdio-absolute",
+  "command": "/bin/echo",
+  "args": ["--quiet"]
+}

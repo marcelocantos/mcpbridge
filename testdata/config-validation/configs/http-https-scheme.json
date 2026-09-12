@@ -1,0 +1,5 @@
+{
+  "schema": 2,
+  "name": "http-https-scheme",
+  "url": "https://localhost:9000/mcp"
+}
