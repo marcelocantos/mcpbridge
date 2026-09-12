@@ -137,7 +137,7 @@ Envelope fields:
 | `name` | string | yes | — | **stable** — identifier the wrapper sends to the daemon on registration; the file path is no longer constrained to match. |
 | `command` | string | one of `command`/`url` | — | **stable** — stdio backend; tilde-expanded at parse time. |
 | `args` | array of string | no | `[]` | **stable** — passed verbatim to `execvp`; no shell expansion. |
-| `url` | string | one of `command`/`url` | — | **stable** — plain `http://` loopback URLs only in v1 of the HTTP backend (`localhost` / `127.0.0.1`); `https://` and remote hosts rejected. The schema also names `::1`; the C wrapper currently rejects IPv6 URL forms (it splits the host at the first `:`). |
+| `url` | string | one of `command`/`url` | — | **stable** — plain `http://` loopback URLs only in v1 of the HTTP backend: `localhost`, `127.0.0.1`, or `::1` in either bare or RFC 3986 bracketed form (`http://[::1]:9000/mcp`). `https://` and remote hosts rejected. Both validators agree from v0.10.0; before it, the C wrapper rejected IPv6 forms because its tokenizer split the host at the first `:`. |
 | `tool_call_timeout_ms` | int (≥0) | no | `300000` | **stable** — added in v0.6.0. Wrapper-only: the C parser reads it; the daemon ignores unknown JSON keys. Bounds how long any single tool call may wait for the upstream when the HTTP backend is in retry. `0` disables the bound (retry until the agent or some outer timeout intervenes). Idle wrapper does no upstream I/O regardless of value. |
 
 Fields `source`, `upgrade`, and `check_interval` were removed in
