@@ -1,0 +1,5 @@
+{
+  "schema": 2,
+  "name": "http-ipv6-loopback-port",
+  "url": "http://[::1]:9000/mcp"
+}

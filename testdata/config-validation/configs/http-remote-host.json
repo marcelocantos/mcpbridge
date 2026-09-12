@@ -1,0 +1,5 @@
+{
+  "schema": 2,
+  "name": "http-remote-host",
+  "url": "http://example.com/mcp"
+}

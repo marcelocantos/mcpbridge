@@ -1,0 +1,5 @@
+{
+  "schema": 2,
+  "name": "http-localhost-suffix",
+  "url": "http://localhost.example.com/mcp"
+}
