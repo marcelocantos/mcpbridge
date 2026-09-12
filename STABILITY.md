@@ -217,6 +217,12 @@ The wrapper exits only on: stdin EOF, SIGINT, SIGTERM, or an FSM
 transition to `FAILED`. Daemon socket loss never triggers any of
 these. Verified by `tests/e2e_daemon_outage_test.sh`.
 
+A stdio child that dies while the FSM is `RUNNING` (or dies during
+`SWAPPING` before the new transport is up) is a `FAILED` transition:
+the wrapper exits. Session survival across upstream restarts is the
+daemon-driven reload / HTTP self-reload path, not crash recovery of
+a stdio child. Verified by `tests/e2e_child_death_running_test.sh`.
+
 ### Internal Go API
 
 `daemon/internal/*` — **not public**. Go's `internal` mechanism

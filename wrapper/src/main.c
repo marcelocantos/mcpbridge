@@ -695,10 +695,11 @@ static int run_loop(struct loop_ctx *ctx) {
                 sink_emit_event(ctx, FSM_EV_CHILD_EXIT);
                 int status = 0;
                 (void)transport_stdio_reap(ctx->transport, &status);
-                /* If we just initiated a swap (FSM moved to
-                 * SWAPPING via DRAINING+CHILD_EXIT) the next loop
-                 * iteration will run perform_swap. Otherwise the
-                 * child is gone for good and we should exit. */
+                /* Drain-time death (DRAINING+CHILD_EXIT → SWAPPING)
+                 * is the reload short-circuit: the next loop
+                 * iteration will run perform_swap. Unexpected death
+                 * while RUNNING (or a spawn that dies before
+                 * TRANSPORT_STARTED) is FAILED — the wrapper exits. */
                 if (ctx->fsm->state != FSM_SWAPPING) {
                     break;
                 }

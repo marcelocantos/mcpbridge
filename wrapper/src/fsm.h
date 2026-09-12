@@ -29,19 +29,26 @@
  *   STARTING ── TRANSPORT_FAILED  ──► FAILED
  *
  *   RUNNING  ── RELOAD_REQUESTED  ──► DRAINING
- *   RUNNING  ── CHILD_EXIT        ──► RESPAWN
- *   RUNNING  ── TRANSPORT_FAILED  ──► RESPAWN
+ *   RUNNING  ── CHILD_EXIT        ──► FAILED
+ *   RUNNING  ── TRANSPORT_FAILED  ──► FAILED
  *
  *   DRAINING ── IN_FLIGHT_ZERO    ──► SWAPPING
  *   DRAINING ── CHILD_EXIT        ──► SWAPPING   (drain completed "naturally")
  *
  *   SWAPPING ── TRANSPORT_STARTED ──► STARTING   (new child spawned)
- *   SWAPPING ── TRANSPORT_FAILED  ──► RESPAWN
- *   SWAPPING ── CHILD_EXIT        ──► RESPAWN    (child died while we were starting it)
- *
- *   RESPAWN  ── BACKOFF_EXPIRED   ──► SWAPPING   (increments respawn_attempts)
+ *   SWAPPING ── TRANSPORT_FAILED  ──► FAILED
+ *   SWAPPING ── CHILD_EXIT        ──► FAILED     (child died while we were starting it)
  *
  *   FAILED is terminal.
+ *
+ * Unexpected stdio child death while RUNNING (or while SWAPPING
+ * before the new transport is up) ends the wrapper. Session survival
+ * across upstream *restarts* is the daemon-driven reload / HTTP
+ * self-reload path (RUNNING → DRAINING → SWAPPING), not crash
+ * recovery of a stdio child. A previous backoff-retry recovery
+ * state was unit-tested but never driven by the event loop;
+ * e2e_child_death_inflight_test.sh already documents unexpected
+ * death outside a drain as exit-by-design.
  *
  * Any event that does not match an outgoing transition from the
  * current state is ignored: the state is unchanged and fsm_step
@@ -54,7 +61,6 @@ enum fsm_state {
     FSM_RUNNING,
     FSM_DRAINING,
     FSM_SWAPPING,
-    FSM_RESPAWN,
     FSM_FAILED,
 };
 
@@ -66,26 +72,14 @@ enum fsm_event {
     FSM_EV_TRANSPORT_FAILED,
     FSM_EV_RELOAD_REQUESTED,
     FSM_EV_IN_FLIGHT_ZERO,
-    FSM_EV_BACKOFF_EXPIRED,
 };
-
-/* Default maximum number of respawn attempts before giving up. The
- * event loop can override this via fsm_init_with_limit(). */
-#define FSM_RESPAWN_LIMIT_DEFAULT 5
 
 struct fsm {
     enum fsm_state state;
-    int respawn_attempts;
-    int respawn_limit;
 };
 
-/* Initialise an FSM in STARTING with the default respawn limit. */
+/* Initialise an FSM in STARTING. */
 void fsm_init(struct fsm *f);
-
-/* Initialise an FSM with a custom respawn limit. A limit of 0 is
- * treated as 1 (the FSM will attempt at least one respawn before
- * giving up). */
-void fsm_init_with_limit(struct fsm *f, int limit);
 
 /* Feed an event and advance the state. Returns the resulting state.
  * Safe to call with stale or duplicate events — unknown transitions
