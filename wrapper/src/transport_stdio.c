@@ -273,8 +273,16 @@ static int stdio_pump(void *vself,
             return 0;
         }
         if (rc == MCP_READER_TOO_LONG) {
-            log_warn("stdio_pump: dropped oversized line");
-            continue;
+            /* Same contract as the HTTP transport: an over-cap
+             * message is a failed request, never a silently dropped
+             * one. EPROTO lets the event loop settle in-flight
+             * calls with a JSON-RPC error so the agent is not left
+             * waiting on a reply that will never come. */
+            log_error("stdio_pump: line exceeded %u-byte cap; "
+                      "failing the read so the request is not left hanging",
+                      (unsigned)s->reader.max);
+            errno = EPROTO;
+            return -1;
         }
         if (on_msg != NULL) {
             on_msg(ctx, line, len);
