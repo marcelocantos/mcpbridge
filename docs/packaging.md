@@ -58,6 +58,28 @@ INFO listening path=~/Library/Caches/mcpbridge/daemon.sock version=0.4.0
 
 (Socket path is macOS — Linux uses `$XDG_RUNTIME_DIR/mcpbridge/daemon.sock`.)
 
+### Supervisor on macOS
+
+If this host runs other services under Supervisor, use the checked-in
+program instead of starting the Homebrew service:
+
+```sh
+./supervisor/install.sh
+supervisorctl status mcpbridge-daemon
+brew services info mcpbridge
+ls -l ~/Library/Caches/mcpbridge/daemon.sock
+```
+
+The installer writes `mcpbridge-daemon.ini` to
+`/opt/homebrew/etc/supervisor.d/`, stops the Homebrew launchd job, and
+starts the installed Homebrew daemon through Supervisor. The expected
+status is `RUNNING`, with the Homebrew service stopped. Logs go to
+`~/.local/var/log/mcpbridge-daemon.log`. Re-running the installer is safe.
+Set `SUPERVISOR_CONF_DIR` to use a different Supervisor config directory.
+
+For the remaining steps, replace `brew services restart mcpbridge` with
+`supervisorctl restart mcpbridge-daemon` and use the Supervisor log path.
+
 ## 3. Drop a config
 
 The same JSON file describes both how to reach the wrapped MCP

@@ -78,6 +78,14 @@ This launches `mcpbridge-daemon` under launchd (macOS) or systemd
 (Linux) with keep-alive. Logs go to
 `$(brew --prefix)/var/log/mcpbridge-daemon.log`.
 
+On a macOS host where Supervisor already manages local services, run
+`./supervisor/install.sh` from this checkout instead. It stops the
+Homebrew launchd job, starts the installed binary under Supervisor,
+and logs to `~/.local/var/log/mcpbridge-daemon.log`. Use
+`supervisorctl status mcpbridge-daemon` to verify it, and replace
+subsequent `brew services restart mcpbridge` commands with
+`supervisorctl restart mcpbridge-daemon`.
+
 **Verification**: before going further, confirm the daemon is
 running and the socket exists:
 

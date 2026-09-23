@@ -57,6 +57,12 @@ brew install mcpbridge
 brew services start mcpbridge
 ```
 
+On a macOS host already using Supervisor for local services, run
+`supervisor/install.sh` from this checkout instead of `brew services start
+mcpbridge`. The installer transfers the daemon's user socket from the
+Homebrew launchd job to Supervisor. It runs the installed Homebrew binary;
+see [docs/packaging.md](docs/packaging.md#supervisor-on-macos).
+
 Drop a per-server config file in `~/.config/mcpbridge/`
 (see [docs/config-schema.md](docs/config-schema.md)) and point your
 MCP client at it:
