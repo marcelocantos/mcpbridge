@@ -320,8 +320,8 @@ These must be addressed before the v1.0.0 release can ship.
    land post-1.0 without breaking existing users.
 
 5. **No GitHub release publishing automation beyond what's
-   shipped.** The Homebrew formula publishing is automated via
-   homebrew-releaser, but version strings in source files remain
+   shipped.** The Homebrew formula is published with tapper
+   (`make release-tap`) after the release assets upload, but version strings in source files remain
    injected from `VERSION=<tag>` at `make` time — there's no
    check that a commit hasn't accidentally hardcoded `0.0.0-dev`
    somewhere that bypasses the injection. A pre-tag lint would
