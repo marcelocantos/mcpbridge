@@ -83,38 +83,3 @@ jobs:
           RAW_VERSION="${VERSION#v}"
           STAGE="mcpbridge-${RAW_VERSION}-${{ matrix.target }}"
           gh release upload "$VERSION" "$STAGE.tar.gz" --clobber
-
-  homebrew:
-    name: publish homebrew formula
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Release to Homebrew tap
-        uses: Justintime50/homebrew-releaser@v3
-        with:
-          homebrew_owner: marcelocantos
-          homebrew_tap: homebrew-tap
-          formula_folder: Formula
-          github_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          version: ${{ github.event.release.tag_name }}
-          # Install: both binaries from the extracted tarball.
-          install: |
-            bin.install "mcpbridge"
-            bin.install "mcpbridge-daemon"
-          # Run as a background service via brew services.
-          formula_includes: |
-            service do
-              run [opt_bin/"mcpbridge-daemon"]
-              keep_alive true
-              log_path var/"log/mcpbridge-daemon.log"
-              error_log_path var/"log/mcpbridge-daemon.log"
-            end
-          target_darwin_arm64: true
-          target_linux_amd64: true
-          target_linux_arm64: true
-          test: |
-            system "#{bin}/mcpbridge", "--version"
-            system "#{bin}/mcpbridge-daemon", "--version"
-          skip_checksum: true
-          update_readme_table: true

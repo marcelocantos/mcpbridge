@@ -1,0 +1,31 @@
+# Homebrew tap publication for mcpbridge. `tapper push` runs from the dev
+# Mac after the GitHub release exists; the token lives in the macOS
+# keychain, so there is no Actions secret and no CI step.
+repo: marcelocantos/mcpbridge
+tap:
+  owner: marcelocantos
+  name: homebrew-tap
+push:
+  darwin_arm64: true
+  linux_amd64: true
+  linux_arm64: true
+  skip_checksum: true
+  update_readme_table: true
+# Install: both binaries from the extracted tarball.
+install: |
+  bin.install "mcpbridge"
+  bin.install "mcpbridge-daemon"
+test: |
+  system "#{bin}/mcpbridge", "--version"
+  system "#{bin}/mcpbridge-daemon", "--version"
+# Run as a background service via brew services.
+formula_includes: |
+  service do
+    run [opt_bin/"mcpbridge-daemon"]
+    keep_alive true
+    log_path var/"log/mcpbridge-daemon.log"
+    error_log_path var/"log/mcpbridge-daemon.log"
+  end
+token:
+  env: HOMEBREW_TAP_TOKEN
+  op: op://Personal/GitHub Homebrew Tap PAT/token
